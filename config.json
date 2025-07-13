@@ -126,22 +126,21 @@
     "LOC",
     "PRODUCT"
   ],
-  "generic_words": [
-    "hand",
-    "part",
-    "piece",
-    "thing",
-    "item",
-    "kit",
-    "set",
-    "group",
-    "type",
-    "kind",
-    "sort"
+  "generic_words": ["thing", "stuff", "item", "object", "file", "data"],
+  "time_event_indicators": ["christmas", "birthday", "wedding", "holiday"],
+  "object_context_indicators": [
+    "decoration",
+    "ornament",
+    "design",
+    "art",
+    "gift",
+    "toy"
   ],
+  "technique_indicators": ["technique", "method", "style", "approach", "way"],
+  "abstract_suffixes": ["tion", "sion", "ness", "ment", "ity", "ism"],
   "multi_layer_classification": {
     "semantic_confidence_threshold": 0.7,
-    "morphological_confidence_threshold": 0.6,
+    "morphological_confidence_threshold": 0.7,
     "dependency_confidence_threshold": 0.5,
     "pos_aware_boost": 0.3,
     "entity_correction_boost": 0.2,
@@ -178,28 +177,34 @@
     "object_dependency_labels": ["dobj", "pobj", "nsubj", "compound"]
   },
   "entity_correction": {
-    "color_words": [
-      "red",
-      "blue",
-      "green",
-      "yellow",
-      "orange",
-      "purple",
-      "pink",
-      "brown",
-      "black",
-      "white",
-      "gray",
-      "grey"
-    ],
-    "misclassified_pos_tags": ["PROPN", "NNP"],
-    "correction_confidence": 0.9
+    "correction_confidence": 0.9,
+    "misclassified_pos_tags": ["NOUN", "PROPN"]
   },
   "compound_detection": {
     "subject_indicators": ["animal", "object", "person", "place", "thing"],
     "compound_boost_threshold": 0.5,
     "max_compound_length": 3,
-    "semantic_coherence_threshold": 0.4
+    "semantic_coherence_threshold": 0.3,
+    "compound_subject_similarity_threshold": 0.4,
+    "type_indicators": [
+      "decoration",
+      "ornament",
+      "item",
+      "object",
+      "piece",
+      "art",
+      "design",
+      "type",
+      "style",
+      "variant"
+    ],
+    "decoration_related": [
+      "decoration",
+      "ornament",
+      "accessory",
+      "embellishment",
+      "adornment"
+    ]
   },
   "context_fallback": {
     "min_context_tokens": 2,
