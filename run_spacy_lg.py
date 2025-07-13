@@ -1,175 +1,73 @@
 import spacy
 import json
-
-# 📌 Load spaCy large model
-nlp = spacy.load("en_core_web_lg")
-
-
-def categorize_attributes_dynamically(doc, main_objective=None, sub_objectives=None):
-    """Dynamically categorize tokens using spaCy's linguistic analysis only"""
-    attributes = {
-        "adjectives": [],
-        "descriptors": [],
-        "modifiers": [],
-        "actions": [],
-        "format_types": [],  # NEW: For capturing format descriptors
-        "entities": [],
-    }
-
-    # Get list of main content words to avoid duplicating in modifiers
-    content_words = set()
-    if main_objective:
-        content_words.add(main_objective.lower())
-    if sub_objectives:
-        content_words.update([obj.lower() for obj in sub_objectives])
-
-    # First pass: identify compound modifiers like "hand drawn"
-    compound_modifiers = []
-    doc_tokens = [token for token in doc]
-
-    for i in range(len(doc_tokens) - 1):
-        current_token = doc_tokens[i]
-        next_token = doc_tokens[i + 1]
-
-        # Look for patterns like "hand drawn", "oil painted", etc.
-        if (
-            current_token.pos_ == "NOUN"
-            and next_token.pos_ == "VERB"
-            and next_token.tag_
-            in ["VBN", "VBD"]  # Handle both past participle and past tense
-            and is_artistic_descriptor(next_token)
-        ):
-
-            compound_phrase = f"{current_token.text} {next_token.text}"
-            compound_modifiers.append(compound_phrase)
-
-    # Also check for adjective + past participle patterns like "hand painted"
-    for i in range(len(doc_tokens) - 1):
-        current_token = doc_tokens[i]
-        next_token = doc_tokens[i + 1]
-
-        # Look for patterns like "hand painted" where "hand" might be tagged as ADJ
-        if (
-            current_token.pos_ in ["NOUN", "ADJ"]
-            and next_token.pos_ == "VERB"
-            and next_token.tag_
-            in ["VBN", "VBD"]  # Handle both past participle and past tense
-            and is_artistic_descriptor(next_token)
-            and current_token.text.lower()
-            in ["hand", "oil", "water", "digital", "computer"]
-        ):
-
-            compound_phrase = f"{current_token.text} {next_token.text}"
-            # Avoid duplicates
-            if compound_phrase not in compound_modifiers:
-                compound_modifiers.append(compound_phrase)
-
-    # Track tokens that are part of compound modifiers
-    tokens_in_compounds = set()
-    for compound in compound_modifiers:
-        parts = compound.split()
-        for part in parts:
-            tokens_in_compounds.add(part.lower())
-
-    for token in doc:
-        token_text = token.text
-        token_lower = token_text.lower()
-
-        # Skip tokens that are part of compound modifiers
-        if token_lower in tokens_in_compounds:
-            continue
-
-        # 1. Check if this is a format descriptor first
-        if token.pos_ in ["NOUN", "PROPN"] and is_format_descriptor(token):
-            attributes["format_types"].append(token_text)
-
-        # 2. Adjectives are natural descriptive attributes
-        elif token.pos_ == "ADJ":
-            attributes["adjectives"].append(token_text)
-
-        # 3. Adverbs that modify adjectives/verbs (descriptors)
-        elif token.pos_ == "ADV":
-            attributes["descriptors"].append(token_text)
-
-        # 4. Verbs in present participle form (actions like "flying", "running")
-        elif token.pos_ == "VERB" and token.tag_ == "VBG":
-            attributes["actions"].append(token_text)
-
-        # 5. Past participles used as descriptors (drawn, painted, carved, etc.)
-        elif token.pos_ == "VERB" and token.tag_ in [
-            "VBN",
-            "VBD",
-        ]:  # Handle both past participle and past tense
-            # Check if it's an artistic/style descriptor
-            if is_artistic_descriptor(token):
-                attributes["descriptors"].append(token_text)
-            else:
-                attributes["actions"].append(token_text)
-
-        # 6. Dependency-based modifiers - but exclude main content words and format types
-        elif token.dep_ in ["amod", "compound", "nmod"]:
-            # Only add as modifier if it's not the main objective, sub-objective, or format type
-            if token_text.lower() not in content_words and not is_format_descriptor(
-                token
-            ):
-                attributes["modifiers"].append(token_text)
-
-        # 7. Named entities (people, places, organizations, etc.) - but filter out obvious false positives
-        if token.ent_type_ and is_valid_entity(token):
-            attributes["entities"].append(
-                {
-                    "text": token_text,
-                    "type": token.ent_type_,
-                    "label": spacy.explain(token.ent_type_),
-                }
-            )
-
-    # Add compound modifiers
-    if compound_modifiers:
-        if "modifiers" not in attributes:
-            attributes["modifiers"] = []
-        attributes["modifiers"].extend(compound_modifiers)
-
-    # Post-processing: Add non-objective words from noun chunks as modifiers
-    if main_objective:
-        for chunk in doc.noun_chunks:
-            chunk_tokens = [token.text for token in chunk]
-            for token_text in chunk_tokens:
-                if (
-                    token_text.lower() != main_objective.lower()
-                    and token_text.lower()
-                    not in [obj.lower() for obj in (sub_objectives or [])]
-                    and token_text not in attributes.get("format_types", [])
-                    and token_text not in attributes.get("adjectives", [])
-                    and token_text not in attributes.get("descriptors", [])
-                    and token_text not in attributes.get("actions", [])
-                    and token_text
-                    not in [mod.split()[0] for mod in attributes.get("modifiers", [])]
-                ):  # Avoid duplicates from compound modifiers
-
-                    if "modifiers" not in attributes:
-                        attributes["modifiers"] = []
-                    attributes["modifiers"].append(token_text)
-
-    # Remove empty categories and deduplicate
-    final_attributes = {}
-    for category, items in attributes.items():
-        if items:
-            if category == "entities":
-                final_attributes[category] = items
-            else:
-                final_attributes[category] = list(set(items))
-
-    return final_attributes
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Tuple
+from functools import lru_cache
 
 
-def is_format_descriptor(token):
-    """Determine if a token is a format/asset type descriptor using linguistic analysis"""
+@dataclass
+class NLPConfig:
+    """Configuration class for NLP analysis parameters"""
 
-    # 1. Check semantic context using word vectors - primary method
-    if token.has_vector:
-        # Core format/technical concepts for semantic similarity
-        format_concepts = [
+    # Similarity thresholds
+    similarity_threshold_format: float = 0.45
+    similarity_threshold_artistic: float = 0.6
+    similarity_threshold_format_root: float = 0.5
+
+    # Importance scoring
+    importance_threshold_sub_objectives: int = 3
+    max_sub_objectives: int = 2
+
+    # Base importance scores
+    base_importance_score: int = 1
+    entity_boost: int = 2
+    subject_object_boost: int = 2
+    root_boost: int = 1
+    adjective_modifier_boost: int = 1
+    compound_penalty: int = 1
+    noun_chunk_first_boost: int = 3
+    noun_chunk_last_boost: int = 1
+    generic_penalty: int = 3
+    concrete_noun_boost: int = 2
+    subject_indicator_boost: int = 2
+    format_descriptor_penalty: int = 3
+
+    # POS tags and dependency labels
+    past_participle_tags: List[str] = field(default_factory=lambda: ["VBN", "VBD"])
+    content_pos_tags: List[str] = field(default_factory=lambda: ["NOUN", "PROPN"])
+    modifier_deps: List[str] = field(
+        default_factory=lambda: ["amod", "compound", "nmod"]
+    )
+    subject_object_deps: List[str] = field(
+        default_factory=lambda: ["nsubj", "nsubjpass", "dobj", "pobj"]
+    )
+
+    # Word lists
+    artistic_terms: List[str] = field(
+        default_factory=lambda: [
+            "drawn",
+            "painted",
+            "carved",
+            "sculpted",
+            "sketched",
+            "illustrated",
+            "rendered",
+            "crafted",
+            "designed",
+            "created",
+            "handmade",
+            "traced",
+            "etched",
+            "printed",
+            "digitized",
+            "stylized",
+            "engraved",
+            "embossed",
+        ]
+    )
+
+    format_concepts: List[str] = field(
+        default_factory=lambda: [
             "image",
             "graphic",
             "design",
@@ -183,31 +81,627 @@ def is_format_descriptor(token):
             "file",
             "style",
         ]
+    )
 
-        for concept in format_concepts:
-            concept_token = nlp(concept)[0]
-            if concept_token.has_vector:
-                similarity = token.similarity(concept_token)
+    artistic_concepts: List[str] = field(
+        default_factory=lambda: [
+            "drawn",
+            "painted",
+            "artistic",
+            "created",
+            "handmade",
+            "sketched",
+        ]
+    )
+
+    false_positive_entities: List[str] = field(
+        default_factory=lambda: [
+            "red",
+            "blue",
+            "green",
+            "yellow",
+            "black",
+            "white",
+            "orange",
+            "purple",
+            "apple",
+            "cat",
+            "dog",
+            "flower",
+            "tree",
+            "house",
+            "car",
+            "book",
+            "small",
+            "large",
+            "big",
+            "little",
+            "old",
+            "new",
+            "good",
+            "bad",
+            "digital",
+            "analog",
+            "manual",
+            "automatic",
+            "modern",
+            "classic",
+            "wooden",
+            "metal",
+            "plastic",
+            "glass",
+            "stone",
+            "paper",
+        ]
+    )
+
+    valid_entity_types: List[str] = field(
+        default_factory=lambda: [
+            "PERSON",
+            "GPE",
+            "ORG",
+            "EVENT",
+            "FAC",
+            "LOC",
+            "PRODUCT",
+        ]
+    )
+
+    generic_words: List[str] = field(
+        default_factory=lambda: [
+            "hand",
+            "part",
+            "piece",
+            "thing",
+            "item",
+            "kit",
+            "set",
+            "group",
+        ]
+    )
+
+    compound_parts: List[str] = field(
+        default_factory=lambda: [
+            "hand",
+            "oil",
+            "water",
+            "digital",
+            "computer",
+            "machine",
+        ]
+    )
+
+    artistic_modifiers: List[str] = field(
+        default_factory=lambda: ["hand", "oil", "water", "digital", "computer"]
+    )
+
+    subject_indicators: List[str] = field(
+        default_factory=lambda: [
+            "portrait",
+            "painting",
+            "drawing",
+            "sketch",
+            "illustration",
+            "photo",
+            "image",
+            "picture",
+            "artwork",
+            "design",
+            "logo",
+            "icon",
+            "symbol",
+            "animal",
+            "person",
+            "face",
+            "landscape",
+            "building",
+            "car",
+            "tree",
+            "flower",
+            "bird",
+            "cat",
+            "dog",
+            "horse",
+            "elephant",
+            "lion",
+            "border",
+            "frame",
+            "pattern",
+            "background",
+            "texture",
+            "banner",
+        ]
+    )
+
+    concrete_nouns: List[str] = field(
+        default_factory=lambda: [
+            "apple",
+            "football",
+            "soccer",
+            "basketball",
+            "tennis",
+            "baseball",
+            "car",
+            "house",
+            "tree",
+            "flower",
+            "cat",
+            "dog",
+            "bird",
+            "fish",
+            "border",
+            "frame",
+            "pattern",
+            "background",
+            "texture",
+            "banner",
+        ]
+    )
+
+    colors: List[str] = field(
+        default_factory=lambda: [
+            "red",
+            "blue",
+            "green",
+            "yellow",
+            "orange",
+            "purple",
+            "pink",
+            "brown",
+            "black",
+            "white",
+            "gray",
+            "grey",
+            "cyan",
+            "magenta",
+            "violet",
+            "indigo",
+            "maroon",
+            "navy",
+            "olive",
+            "lime",
+            "aqua",
+            "teal",
+            "silver",
+            "gold",
+            "crimson",
+            "scarlet",
+            "azure",
+            "emerald",
+            "amber",
+            "coral",
+            "turquoise",
+            "beige",
+            "tan",
+            "burgundy",
+            "khaki",
+            "lavender",
+            "mint",
+            "peach",
+            "salmon",
+            "ivory",
+            "cream",
+            "charcoal",
+        ]
+    )
+
+
+class NLPAnalyzer:
+    """Advanced NLP analyzer using spaCy for query intent extraction"""
+
+    def __init__(self, config: Optional[NLPConfig] = None):
+        self.config = config or NLPConfig()
+        self.nlp = self._load_model()
+
+    @lru_cache(maxsize=1)
+    def _load_model(self):
+        """Load spaCy model with caching"""
+        return spacy.load("en_core_web_lg")
+
+    def analyze_query(self, query: str) -> Dict[str, Any]:
+        """Main method to analyze a query and extract intent"""
+        doc = self.nlp(query)
+
+        # Extract main and sub objectives using linguistic analysis
+        main_objective, sub_objectives = self._extract_main_objective(doc)
+
+        # Categorize attributes dynamically
+        attributes = self._categorize_attributes(doc, main_objective, sub_objectives)
+
+        # Get all candidate phrases for reference
+        candidates = self._extract_candidates(doc)
+
+        return {
+            "query": query,
+            "main_objective": main_objective,
+            "sub_objectives": sub_objectives,
+            "attributes": attributes,
+            "all_candidates": candidates,
+        }
+
+    def _extract_main_objective(self, doc) -> Tuple[Optional[str], List[str]]:
+        """Extract main objective using pure spaCy linguistic analysis"""
+        # Extract compound modifiers first
+        compound_modifiers = self._extract_compound_modifiers(doc)
+
+        # Track tokens in compounds to avoid duplicates
+        tokens_in_compounds = self._get_tokens_in_compounds(compound_modifiers)
+
+        # Find content candidates
+        content_candidates = self._find_content_candidates(doc, tokens_in_compounds)
+
+        # Sort by importance
+        content_candidates.sort(key=lambda x: (-x["importance"], x["is_format"]))
+
+        # Set main objective and sub-objectives
+        return self._assign_objectives(content_candidates)
+
+    def _extract_compound_modifiers(self, doc) -> List[str]:
+        """Extract compound modifiers like 'hand drawn', 'oil painted'"""
+        compound_modifiers = []
+        doc_tokens = [token for token in doc]
+
+        for i in range(len(doc_tokens) - 1):
+            current_token = doc_tokens[i]
+            next_token = doc_tokens[i + 1]
+
+            # Check for compound patterns
+            if self._is_compound_pattern(current_token, next_token):
+                compound_phrase = f"{current_token.text} {next_token.text}"
+                if compound_phrase not in compound_modifiers:
+                    compound_modifiers.append(compound_phrase)
+
+        return compound_modifiers
+
+    def _is_compound_pattern(self, current_token, next_token) -> bool:
+        """Check if two tokens form a compound pattern"""
+        # Pattern 1: NOUN + VERB (past participle)
+        pattern1 = (
+            current_token.pos_ == "NOUN"
+            and next_token.pos_ == "VERB"
+            and next_token.tag_ in self.config.past_participle_tags
+            and self._is_artistic_descriptor(next_token)
+        )
+
+        # Pattern 2: (NOUN|ADJ) + VERB with specific artistic modifiers
+        pattern2 = (
+            current_token.pos_ in ["NOUN", "ADJ"]
+            and next_token.pos_ == "VERB"
+            and next_token.tag_ in self.config.past_participle_tags
+            and self._is_artistic_descriptor(next_token)
+            and current_token.text.lower() in self.config.artistic_modifiers
+        )
+
+        return pattern1 or pattern2
+
+    def _get_tokens_in_compounds(self, compound_modifiers: List[str]) -> set:
+        """Get set of tokens that are part of compound modifiers"""
+        tokens_in_compounds = set()
+        for compound in compound_modifiers:
+            parts = compound.split()
+            for part in parts:
+                tokens_in_compounds.add(part.lower())
+        return tokens_in_compounds
+
+    def _find_content_candidates(
+        self, doc, tokens_in_compounds: set
+    ) -> List[Dict[str, Any]]:
+        """Find potential content words with importance scoring"""
+        content_candidates = []
+
+        for token in doc:
+            if token.pos_ in self.config.content_pos_tags:
+                # Skip tokens in compound modifiers
+                if token.text.lower() in tokens_in_compounds:
+                    continue
+
+                importance_score = self._calculate_importance_score(token, doc)
+                is_format = self._is_format_descriptor(token)
+
+                content_candidates.append(
+                    {
+                        "text": token.text,
+                        "importance": importance_score,
+                        "is_format": is_format,
+                        "pos": token.pos_,
+                        "dep": token.dep_,
+                        "ent_type": token.ent_type_,
+                    }
+                )
+
+        return content_candidates
+
+    def _calculate_importance_score(self, token, doc) -> int:
+        """Calculate importance score for a token"""
+        importance_score = self.config.base_importance_score
+
+        # Check if it's a format descriptor
+        if self._is_format_descriptor(token):
+            importance_score -= self.config.format_descriptor_penalty
+        else:
+            # Apply various scoring rules
+            importance_score += self._apply_scoring_rules(token, doc)
+
+        return importance_score
+
+    def _apply_scoring_rules(self, token, doc) -> int:
+        """Apply various scoring rules to determine token importance"""
+        score = 0
+
+        # Named entities
+        if token.ent_type_ and self._is_valid_entity(token):
+            score += self.config.entity_boost
+
+        # Subjects and objects
+        if token.dep_ in self.config.subject_object_deps:
+            score += self.config.subject_object_boost
+
+        # Root of dependency tree
+        if token.dep_ == "ROOT":
+            score += self.config.root_boost
+
+        # Tokens with adjective modifiers
+        if any(child.dep_ == "amod" for child in token.children):
+            score += self.config.adjective_modifier_boost
+
+        # Non-compound modifiers
+        if token.dep_ != "compound":
+            score += self.config.compound_penalty
+
+        # First in noun chunks
+        for chunk in doc.noun_chunks:
+            if chunk.start == token.i:
+                score += self.config.noun_chunk_first_boost
+                break
+
+        # Last in noun chunks
+        for chunk in doc.noun_chunks:
+            if chunk.end - 1 == token.i:
+                score += self.config.noun_chunk_last_boost
+                break
+
+        # Generic words penalty
+        if token.text.lower() in self.config.generic_words:
+            score -= self.config.generic_penalty
+
+        # Subject indicators
+        if token.text.lower() in self.config.subject_indicators:
+            score += self.config.subject_indicator_boost
+
+        # Concrete nouns
+        if token.text.lower() in self.config.concrete_nouns:
+            score += self.config.concrete_noun_boost
+
+        # Compound parts penalty
+        if token.text.lower() in self.config.compound_parts:
+            score -= self.config.compound_penalty
+
+        return score
+
+    def _assign_objectives(
+        self, content_candidates: List[Dict[str, Any]]
+    ) -> Tuple[Optional[str], List[str]]:
+        """Assign main objective and sub-objectives from candidates"""
+        main_objective = None
+        sub_objectives = []
+
+        if not content_candidates:
+            return main_objective, sub_objectives
+
+        # Find highest-scoring non-format word as main objective
+        for candidate in content_candidates:
+            if not candidate["is_format"] and candidate["importance"] > 0:
+                main_objective = candidate["text"]
+                break
+
+        # If no non-format word found, use the highest scoring one
+        if not main_objective:
+            main_objective = content_candidates[0]["text"]
+
+        # Add other significant content words as sub-objectives
+        for candidate in content_candidates:
+            if (
+                candidate["text"].lower() != main_objective.lower()
+                and not candidate["is_format"]
+                and candidate["importance"]
+                >= self.config.importance_threshold_sub_objectives
+                and candidate["dep"] != "compound"
+                and not self._is_color(candidate["text"])
+            ):
+                sub_objectives.append(candidate["text"])
+                if len(sub_objectives) >= self.config.max_sub_objectives:
+                    break
+
+        return main_objective, sub_objectives
+
+    def _categorize_attributes(
+        self, doc, main_objective: Optional[str], sub_objectives: List[str]
+    ) -> Dict[str, Any]:
+        """Dynamically categorize tokens using spaCy's linguistic analysis"""
+        attributes = {
+            "adjectives": [],
+            "descriptors": [],
+            "modifiers": [],
+            "actions": [],
+            "format_types": [],
+            "entities": [],
+            "colors": [],
+        }
+
+        # Get content words to avoid duplicating in modifiers
+        content_words = self._get_content_words(main_objective, sub_objectives)
+
+        # Extract compound modifiers
+        compound_modifiers = self._extract_compound_modifiers(doc)
+        tokens_in_compounds = self._get_tokens_in_compounds(compound_modifiers)
+
+        # Categorize tokens
+        self._categorize_tokens(doc, attributes, content_words, tokens_in_compounds)
+
+        # Add compound modifiers
+        if compound_modifiers:
+            attributes["modifiers"].extend(compound_modifiers)
+
+        # Post-process attributes
+        self._post_process_attributes(doc, attributes, main_objective, sub_objectives)
+
+        return self._finalize_attributes(attributes)
+
+    def _get_content_words(
+        self, main_objective: Optional[str], sub_objectives: List[str]
+    ) -> set:
+        """Get set of main content words"""
+        content_words = set()
+        if main_objective:
+            content_words.add(main_objective.lower())
+        if sub_objectives:
+            content_words.update([obj.lower() for obj in sub_objectives])
+        return content_words
+
+    def _categorize_tokens(
+        self,
+        doc,
+        attributes: Dict[str, List],
+        content_words: set,
+        tokens_in_compounds: set,
+    ):
+        """Categorize individual tokens based on their linguistic properties"""
+        for token in doc:
+            token_text = token.text
+            token_lower = token_text.lower()
+
+            # Skip tokens in compounds
+            if token_lower in tokens_in_compounds:
+                continue
+
+            # Categorize based on POS and other features
+            if self._is_color(token):
+                attributes["colors"].append(token_text)
+            elif (
+                token.pos_ in self.config.content_pos_tags
+                and self._is_format_descriptor(token)
+            ):
+                attributes["format_types"].append(token_text)
+            elif token.pos_ == "ADJ":
+                attributes["adjectives"].append(token_text)
+            elif token.pos_ == "ADV":
+                attributes["descriptors"].append(token_text)
+            elif token.pos_ == "VERB" and token.tag_ == "VBG":
+                attributes["actions"].append(token_text)
+            elif (
+                token.pos_ == "VERB" and token.tag_ in self.config.past_participle_tags
+            ):
+                if self._is_artistic_descriptor(token):
+                    attributes["descriptors"].append(token_text)
+                else:
+                    attributes["actions"].append(token_text)
+            elif token.dep_ in self.config.modifier_deps:
                 if (
-                    similarity > 0.45
-                ):  # Lowered threshold to catch style descriptors like silhouette
-                    return True
+                    token_text.lower() not in content_words
+                    and not self._is_format_descriptor(token)
+                    and not self._is_color(token)
+                ):
+                    attributes["modifiers"].append(token_text)
 
-    # 2. Check for typical format suffixes or patterns
-    token_lower = token.text.lower()
-    if token_lower.endswith(("ic", "ics")) and token.pos_ in ["NOUN", "PROPN"]:
-        # Words ending in these suffixes often describe format/type
+            # Handle entities
+            if token.ent_type_ and self._is_valid_entity(token):
+                attributes["entities"].append(
+                    {
+                        "text": token_text,
+                        "type": token.ent_type_,
+                        "label": spacy.explain(token.ent_type_),
+                    }
+                )
+
+    def _post_process_attributes(
+        self,
+        doc,
+        attributes: Dict[str, List],
+        main_objective: Optional[str],
+        sub_objectives: List[str],
+    ):
+        """Post-process attributes to add modifiers from noun chunks"""
+        if not main_objective:
+            return
+
+        for chunk in doc.noun_chunks:
+            chunk_tokens = [token.text for token in chunk]
+            for token_text in chunk_tokens:
+                if self._should_add_as_modifier(
+                    token_text, main_objective, sub_objectives, attributes
+                ):
+                    if "modifiers" not in attributes:
+                        attributes["modifiers"] = []
+                    attributes["modifiers"].append(token_text)
+
+    def _should_add_as_modifier(
+        self,
+        token_text: str,
+        main_objective: str,
+        sub_objectives: List[str],
+        attributes: Dict[str, List],
+    ) -> bool:
+        """Check if token should be added as modifier"""
+        token_lower = token_text.lower()
+
+        # Check various exclusion criteria
+        if token_lower == main_objective.lower():
+            return False
+        if token_lower in [obj.lower() for obj in (sub_objectives or [])]:
+            return False
+        if token_text in attributes.get("format_types", []):
+            return False
+        if token_text in attributes.get("adjectives", []):
+            return False
+        if token_text in attributes.get("descriptors", []):
+            return False
+        if token_text in attributes.get("actions", []):
+            return False
+        if token_text in attributes.get("colors", []):
+            return False
+        if self._is_color(token_text):
+            return False
+        if token_text in [mod.split()[0] for mod in attributes.get("modifiers", [])]:
+            return False
+
         return True
 
-    # 3. Position-based logic: if ROOT has multiple compound children, check if it's format
-    if token.dep_ == "ROOT" and token.pos_ in ["NOUN", "PROPN"]:
-        compound_children = [
-            child for child in token.children if child.dep_ == "compound"
-        ]
-        if len(compound_children) >= 2:
-            # If root has multiple compound modifiers, it might be format descriptor
-            # But only if it has high semantic similarity to format concepts
-            if token.has_vector:
+    def _finalize_attributes(self, attributes: Dict[str, List]) -> Dict[str, Any]:
+        """Remove empty categories and deduplicate"""
+        final_attributes = {}
+        for category, items in attributes.items():
+            if items:
+                if category == "entities":
+                    final_attributes[category] = items
+                else:
+                    final_attributes[category] = list(set(items))
+        return final_attributes
+
+    def _is_format_descriptor(self, token) -> bool:
+        """Determine if a token is a format/asset type descriptor"""
+        # Semantic similarity check
+        if token.has_vector:
+            for concept in self.config.format_concepts:
+                concept_token = self.nlp(concept)[0]
+                if concept_token.has_vector:
+                    similarity = token.similarity(concept_token)
+                    if similarity > self.config.similarity_threshold_format:
+                        return True
+
+        # Suffix pattern check
+        token_lower = token.text.lower()
+        if (
+            token_lower.endswith(("ic", "ics"))
+            and token.pos_ in self.config.content_pos_tags
+        ):
+            return True
+
+        # Root with compound children check
+        if token.dep_ == "ROOT" and token.pos_ in self.config.content_pos_tags:
+            compound_children = [
+                child for child in token.children if child.dep_ == "compound"
+            ]
+            if len(compound_children) >= 2 and token.has_vector:
                 for concept in [
                     "image",
                     "graphic",
@@ -218,426 +712,104 @@ def is_format_descriptor(token):
                     "icon",
                     "vector",
                 ]:
-                    concept_token = nlp(concept)[0]
+                    concept_token = self.nlp(concept)[0]
                     if concept_token.has_vector:
                         similarity = token.similarity(concept_token)
-                        if similarity > 0.5:  # Lower threshold for this specific case
+                        if similarity > self.config.similarity_threshold_format_root:
                             return True
 
-    return False
-
-
-def is_artistic_descriptor(token):
-    """Check if a past participle is an artistic/style descriptor"""
-    token_lower = token.text.lower()
-
-    # Common artistic descriptors
-    artistic_terms = [
-        "drawn",
-        "painted",
-        "carved",
-        "sculpted",
-        "sketched",
-        "illustrated",
-        "rendered",
-        "crafted",
-        "designed",
-        "created",
-        "handmade",
-        "traced",
-        "etched",
-        "printed",
-        "digitized",
-        "stylized",
-        "engraved",
-        "embossed",
-    ]
-
-    if token_lower in artistic_terms:
-        return True
-
-    # Check semantic similarity to artistic concepts
-    if token.has_vector:
-        artistic_concepts = [
-            "drawn",
-            "painted",
-            "artistic",
-            "created",
-            "handmade",
-            "sketched",
-        ]
-        for concept in artistic_concepts:
-            concept_token = nlp(concept)[0]
-            if concept_token.has_vector:
-                similarity = token.similarity(concept_token)
-                if similarity > 0.6:  # High threshold for artistic descriptors
-                    return True
-
-    return False
-
-
-def is_valid_entity(token):
-    """Filter out obvious false positive entities"""
-    token_lower = token.text.lower()
-
-    # Common words that get incorrectly tagged as entities
-    false_positives = [
-        "red",
-        "blue",
-        "green",
-        "yellow",
-        "black",
-        "white",
-        "orange",
-        "purple",
-        "apple",
-        "cat",
-        "dog",
-        "flower",
-        "tree",
-        "house",
-        "car",
-        "book",
-        "small",
-        "large",
-        "big",
-        "little",
-        "old",
-        "new",
-        "good",
-        "bad",
-        "digital",
-        "analog",
-        "manual",
-        "automatic",
-        "modern",
-        "classic",
-        "wooden",
-        "metal",
-        "plastic",
-        "glass",
-        "stone",
-        "paper",
-    ]
-
-    # Don't include common adjectives/nouns as entities
-    if token_lower in false_positives:
         return False
 
-    # Only include entities that are likely to be actual named entities
-    valid_entity_types = ["PERSON", "GPE", "ORG", "EVENT", "FAC", "LOC", "PRODUCT"]
-    return token.ent_type_ in valid_entity_types
+    def _is_artistic_descriptor(self, token) -> bool:
+        """Check if a past participle is an artistic/style descriptor"""
+        token_lower = token.text.lower()
 
+        # Direct term match
+        if token_lower in self.config.artistic_terms:
+            return True
 
-def extract_main_objective_linguistically(doc):
-    """Extract main objective using pure spaCy linguistic analysis"""
+        # Semantic similarity check
+        if token.has_vector:
+            for concept in self.config.artistic_concepts:
+                concept_token = self.nlp(concept)[0]
+                if concept_token.has_vector:
+                    similarity = token.similarity(concept_token)
+                    if similarity > self.config.similarity_threshold_artistic:
+                        return True
 
-    main_objective = None
-    sub_objectives = []
+        return False
 
-    # First, identify compound modifiers like "hand drawn"
-    compound_modifiers = []
-    doc_tokens = [token for token in doc]
+    def _is_valid_entity(self, token) -> bool:
+        """Filter out obvious false positive entities"""
+        token_lower = token.text.lower()
 
-    for i in range(len(doc_tokens) - 1):
-        current_token = doc_tokens[i]
-        next_token = doc_tokens[i + 1]
+        # Check against false positives
+        if token_lower in self.config.false_positive_entities:
+            return False
 
-        # Look for patterns like "hand drawn", "oil painted", etc.
-        if (
-            current_token.pos_ == "NOUN"
-            and next_token.pos_ == "VERB"
-            and next_token.tag_
-            in ["VBN", "VBD"]  # Handle both past participle and past tense
-            and is_artistic_descriptor(next_token)
-        ):
+        # Check valid entity types
+        return token.ent_type_ in self.config.valid_entity_types
 
-            compound_phrase = f"{current_token.text} {next_token.text}"
-            compound_modifiers.append(compound_phrase)
+    def _is_color(self, token_or_text) -> bool:
+        """Check if a token or text is a color"""
+        if isinstance(token_or_text, str):
+            return token_or_text.lower() in self.config.colors
+        else:
+            return token_or_text.text.lower() in self.config.colors
 
-    # Also check for adjective + past participle patterns like "hand painted"
-    for i in range(len(doc_tokens) - 1):
-        current_token = doc_tokens[i]
-        next_token = doc_tokens[i + 1]
+    def _extract_candidates(self, doc) -> List[str]:
+        """Extract all candidate phrases for reference"""
+        noun_chunks = []
+        noun_tokens = []
 
-        # Look for patterns like "hand painted" where "hand" might be tagged as ADJ
-        if (
-            current_token.pos_ in ["NOUN", "ADJ"]
-            and next_token.pos_ == "VERB"
-            and next_token.tag_
-            in ["VBN", "VBD"]  # Handle both past participle and past tense
-            and is_artistic_descriptor(next_token)
-            and current_token.text.lower()
-            in ["hand", "oil", "water", "digital", "computer"]
-        ):
+        # Extract noun chunks
+        for chunk in doc.noun_chunks:
+            if chunk.text.strip():
+                noun_chunks.append(chunk.text.strip())
 
-            compound_phrase = f"{current_token.text} {next_token.text}"
-            # Avoid duplicates
-            if compound_phrase not in compound_modifiers:
-                compound_modifiers.append(compound_phrase)
+        # Extract individual noun tokens
+        for token in doc:
+            if token.pos_ in self.config.content_pos_tags and token.text.strip():
+                noun_tokens.append(token.text.strip())
 
-    # Track tokens that are part of compound modifiers - these should NOT be objectives
-    tokens_in_compounds = set()
-    for compound in compound_modifiers:
-        parts = compound.split()
-        for part in parts:
-            tokens_in_compounds.add(part.lower())
-
-    # Find all potential content words (nouns and proper nouns)
-    content_candidates = []
-
-    for token in doc:
-        if token.pos_ in ["NOUN", "PROPN"]:
-
-            # Skip tokens that are part of compound modifiers
-            if token.text.lower() in tokens_in_compounds:
-                continue
-
-            # Calculate semantic importance score
-            importance_score = 1  # Base score
-
-            # Check if this is likely a format descriptor
-            is_format = is_format_descriptor(token)
-
-            if is_format:
-                importance_score -= 3  # Heavy penalty for format descriptors
-            else:
-                # Boost score for content indicators
-
-                # 1. Named entities are usually important content (if valid)
-                if token.ent_type_ and is_valid_entity(token):
-                    importance_score += 2
-
-                # 2. Subjects and objects are typically main content
-                if token.dep_ in ["nsubj", "nsubjpass", "dobj", "pobj"]:
-                    importance_score += 2
-
-                # 3. Root of dependency tree is important, but not always the main content
-                if token.dep_ == "ROOT":
-                    importance_score += 1  # Reduced from 3 to 1
-
-                # 4. Tokens with adjective modifiers are often main concepts
-                if any(child.dep_ == "amod" for child in token.children):
-                    importance_score += 1
-
-                # 5. Tokens that are NOT compound modifiers are more likely content
-                if token.dep_ != "compound":
-                    importance_score += 1
-
-                # 6. Boost score for tokens that appear first in noun chunks
-                # This helps prioritize "apple" in "apple hand drawn" and "football" in "football kit"
-                for chunk in doc.noun_chunks:
-                    if chunk.start == token.i:
-                        importance_score += 3  # Increased from 2 to 3
-                        break
-
-                # 7. Penalty for tokens that are too generic or common
-                if token.text.lower() in [
-                    "hand",
-                    "part",
-                    "piece",
-                    "thing",
-                    "item",
-                    "kit",
-                    "set",
-                    "group",
-                ]:
-                    importance_score -= (
-                        3  # Increased penalty from 2 to 3 to prevent sub-objectives
-                    )
-
-                # 8. Boost score for tokens that appear at the end of phrases
-                # This helps prioritize "portrait" in "digital hand sketched portrait"
-                for chunk in doc.noun_chunks:
-                    if chunk.end - 1 == token.i:  # Last token in noun chunk
-                        importance_score += 1
-                        break
-
-                # 9. Boost score for words that are likely to be main subjects
-                subject_indicators = [
-                    "portrait",
-                    "painting",
-                    "drawing",
-                    "sketch",
-                    "illustration",
-                    "photo",
-                    "image",
-                    "picture",
-                    "artwork",
-                    "design",
-                    "logo",
-                    "icon",
-                    "symbol",
-                    "animal",
-                    "person",
-                    "face",
-                    "landscape",
-                    "building",
-                    "car",
-                    "tree",
-                    "flower",
-                    "bird",
-                    "cat",
-                    "dog",
-                    "horse",
-                    "elephant",
-                    "lion",
-                    "border",
-                    "frame",
-                    "pattern",
-                    "background",
-                    "texture",
-                    "banner",
-                ]
-                if token.text.lower() in subject_indicators:
-                    importance_score += 2
-
-                # 10. Extra boost for concrete nouns vs abstract/generic ones
-                concrete_nouns = [
-                    "apple",
-                    "football",
-                    "soccer",
-                    "basketball",
-                    "tennis",
-                    "baseball",
-                    "car",
-                    "house",
-                    "tree",
-                    "flower",
-                    "cat",
-                    "dog",
-                    "bird",
-                    "fish",
-                    "border",
-                    "frame",
-                    "pattern",
-                    "background",
-                    "texture",
-                    "banner",
-                ]
-                if token.text.lower() in concrete_nouns:
-                    importance_score += 2
-
-                # 11. NEW: Extra penalty for words that are commonly part of compound modifiers
-                compound_parts = [
-                    "hand",
-                    "oil",
-                    "water",
-                    "digital",
-                    "computer",
-                    "machine",
-                ]
-                if token.text.lower() in compound_parts:
-                    importance_score -= 1  # Additional penalty to prevent these from being main objectives
-
-            content_candidates.append(
-                {
-                    "text": token.text,
-                    "importance": importance_score,
-                    "is_format": is_format,
-                    "pos": token.pos_,
-                    "dep": token.dep_,
-                    "ent_type": token.ent_type_,
-                }
-            )
-
-    # Sort by importance (content words first, then by score)
-    content_candidates.sort(key=lambda x: (-x["importance"], x["is_format"]))
-
-    # Set main objective and sub-objectives
-    if content_candidates:
-        # Find the highest-scoring non-format word as main objective
-        for candidate in content_candidates:
-            if not candidate["is_format"] and candidate["importance"] > 0:
-                main_objective = candidate["text"]
-                break
-
-        # If no non-format word found, use the highest scoring one
-        if not main_objective and content_candidates:
-            main_objective = content_candidates[0]["text"]
-
-        # Add other significant content words as sub-objectives
-        # Look for secondary content words (nouns that aren't format descriptors)
-        for candidate in content_candidates:
-            if (
-                candidate["text"].lower() != main_objective.lower()
-                and not candidate["is_format"]
-                and candidate["importance"] >= 3  # Higher threshold for sub-objectives
-                and candidate["dep"]
-                != "compound"  # Exclude compound modifiers from sub-objectives
-            ):
-                sub_objectives.append(candidate["text"])
-                # Limit sub-objectives to avoid clutter
-                if len(sub_objectives) >= 2:
-                    break
-
-    return main_objective, sub_objectives
-
-
-def extract_main_intent(query):
-    """Pure spaCy-based intent extraction without hardcoded lists"""
-    doc = nlp(query)
-
-    # Extract main and sub objectives using linguistic analysis
-    main_objective, sub_objectives = extract_main_objective_linguistically(doc)
-
-    # Categorize attributes dynamically - pass main objective and sub objectives to avoid duplication
-    attributes = categorize_attributes_dynamically(doc, main_objective, sub_objectives)
-
-    # Get all candidate phrases for reference - improved extraction
-    noun_chunks = []
-    noun_tokens = []
-
-    # Extract noun chunks more reliably
-    for chunk in doc.noun_chunks:
-        if chunk.text.strip():  # Ensure non-empty chunks
-            noun_chunks.append(chunk.text.strip())
-
-    # Extract individual noun tokens
-    for token in doc:
-        if token.pos_ in ["NOUN", "PROPN"] and token.text.strip():
-            noun_tokens.append(token.text.strip())
-
-    # Combine and deduplicate candidates
-    all_candidates = noun_chunks + noun_tokens
-    candidates = sorted(set(all_candidates), key=lambda x: -len(x))
-
-    return main_objective, sub_objectives, attributes, candidates
+        # Combine and deduplicate
+        all_candidates = noun_chunks + noun_tokens
+        return sorted(set(all_candidates), key=lambda x: -len(x))
 
 
 def main():
+    """Main function to run the NLP analyzer"""
     query = input("Enter your search query: ").strip()
 
     if not query:
         print("No input provided. Exiting.")
         return
 
-    main_objective, sub_objectives, attributes, candidates = extract_main_intent(query)
+    # Initialize analyzer
+    analyzer = NLPAnalyzer()
 
-    result = {
-        "query": query,
-        "main_objective": main_objective,
-        "sub_objectives": sub_objectives,
-        "attributes": attributes,
-        "all_candidates": candidates,
-    }
+    # Analyze query
+    result = analyzer.analyze_query(query)
 
+    # Display results
     print("\n=== Pure spaCy Linguistic Analysis ===")
     print(json.dumps(result, indent=2))
 
     # Pretty print for better readability
     print("\n=== Structured Output ===")
-    print(f"🎯 Main Objective: {main_objective}")
-    if sub_objectives:
-        print(f"📋 Sub Objectives: {', '.join(sub_objectives)}")
+    print(f"🎯 Main Objective: {result['main_objective']}")
+    if result["sub_objectives"]:
+        print(f"📋 Sub Objectives: {', '.join(result['sub_objectives'])}")
 
-    for attr_type, values in attributes.items():
+    for attr_type, values in result["attributes"].items():
         if values:
             if attr_type == "entities":
                 entity_strs = [f"{item['text']} ({item['label']})" for item in values]
                 print(f"🏷️  {attr_type.title()}: {', '.join(entity_strs)}")
             elif attr_type == "format_types":
                 print(f"📄 Format Types: {', '.join(values)}")
+            elif attr_type == "colors":
+                print(f"🎨 Colors: {', '.join(values)}")
             else:
                 print(f"🏷️  {attr_type.title().replace('_', ' ')}: {', '.join(values)}")
 
