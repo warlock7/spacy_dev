@@ -1,9 +1,9 @@
 {
-  "color_threshold": 0.5,
+  "color_threshold": 0.7,
   "size_threshold": 0.6,
-  "material_threshold": 0.65,
-  "shape_threshold": 0.6,
-  "format_threshold": 0.55,
+  "material_threshold": 0.6,
+  "shape_threshold": 0.55,
+  "format_threshold": 0.6,
   "artistic_threshold": 0.6,
   "importance_threshold_sub_objectives": 3,
   "max_sub_objectives": 2,
@@ -138,5 +138,73 @@
     "type",
     "kind",
     "sort"
-  ]
+  ],
+  "multi_layer_classification": {
+    "semantic_confidence_threshold": 0.7,
+    "morphological_confidence_threshold": 0.6,
+    "dependency_confidence_threshold": 0.5,
+    "pos_aware_boost": 0.3,
+    "entity_correction_boost": 0.2,
+    "compound_subject_boost": 0.4,
+    "context_similarity_threshold": 0.6,
+    "vector_density_threshold": 5.0,
+    "frequency_high_threshold": 10000,
+    "frequency_low_threshold": 30000,
+    "morphological_complexity_threshold": 0.6,
+    "contextual_similarity_high": 0.7,
+    "contextual_similarity_low": 0.3
+  },
+  "pos_specific_handling": {
+    "painting_verb_indicators": [
+      "artist",
+      "person",
+      "someone",
+      "I",
+      "you",
+      "he",
+      "she"
+    ],
+    "painting_noun_indicators": [
+      "artwork",
+      "picture",
+      "image",
+      "canvas",
+      "wall",
+      "gallery"
+    ],
+    "verb_tags": ["VB", "VBD", "VBG", "VBN", "VBP", "VBZ"],
+    "noun_tags": ["NN", "NNS", "NNP", "NNPS"],
+    "action_dependency_labels": ["acl", "ccomp", "xcomp"],
+    "object_dependency_labels": ["dobj", "pobj", "nsubj", "compound"]
+  },
+  "entity_correction": {
+    "color_words": [
+      "red",
+      "blue",
+      "green",
+      "yellow",
+      "orange",
+      "purple",
+      "pink",
+      "brown",
+      "black",
+      "white",
+      "gray",
+      "grey"
+    ],
+    "misclassified_pos_tags": ["PROPN", "NNP"],
+    "correction_confidence": 0.9
+  },
+  "compound_detection": {
+    "subject_indicators": ["animal", "object", "person", "place", "thing"],
+    "compound_boost_threshold": 0.5,
+    "max_compound_length": 3,
+    "semantic_coherence_threshold": 0.4
+  },
+  "context_fallback": {
+    "min_context_tokens": 2,
+    "distance_weight_decay": 0.5,
+    "dependency_weight_boost": 2.0,
+    "context_vector_threshold": 0.6
+  }
 }
