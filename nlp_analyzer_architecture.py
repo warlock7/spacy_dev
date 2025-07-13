@@ -77,6 +77,12 @@ class AnalysisConfig:
     valid_entity_types: List[str]
     generic_words: List[str]
 
+    # Heuristic word lists
+    time_event_indicators: List[str]
+    object_context_indicators: List[str]
+    technique_indicators: List[str]
+    abstract_suffixes: List[str]
+
     # Multi-layer classification parameters
     multi_layer_classification: Dict[str, Union[float, int]]
     pos_specific_handling: Dict[str, Union[List[str], str]]
@@ -99,6 +105,10 @@ class AnalysisConfig:
             "subject_object_deps",
             "valid_entity_types",
             "generic_words",
+            "time_event_indicators",
+            "object_context_indicators",
+            "technique_indicators",
+            "abstract_suffixes",
         ]
 
         for field_name in list_fields:
@@ -332,15 +342,7 @@ class ObjectiveExtractor:
         content_candidates.sort(key=lambda x: (-x["importance"], x["is_format"]))
 
         # Assign objectives
-        return self._assign_objectives(content_candidates)
-
-    def _get_tokens_in_compounds(self, compound_modifiers: List[str]) -> Set[str]:
-        """Get tokens that are part of compound modifiers"""
-        tokens_in_compounds = set()
-        for compound in compound_modifiers:
-            for part in compound.split():
-                tokens_in_compounds.add(part.lower())
-        return tokens_in_compounds
+        return self._assign_objectives(content_candidates, doc)
 
     def _find_content_candidates(
         self, doc, tokens_in_compounds: Set[str]
@@ -471,21 +473,46 @@ class ObjectiveExtractor:
         # Smarter entity penalty: less harsh for short queries with common nouns
         if token.ent_type_ and self._is_valid_entity(token):
             if total_content_tokens <= 3:
-                # Reduced penalty for entities in short queries that might be misidentified common nouns
+                # Much lighter penalty for entities in short queries
                 if token.ent_type_ == "ORG" and self._is_likely_common_noun(token):
                     score -= 2  # Much lighter penalty
                 elif token.ent_type_ == "PERSON" and len(token.text) <= 6:
                     score -= 3  # Lighter penalty for short person names that might be common nouns
+                elif token.pos_ == "PROPN" and token.dep_ == "compound":
+                    score -= 1  # Very light penalty for proper noun compounds in short queries
                 else:
-                    score -= 8  # Original heavy penalty for clear entities
+                    score -= 5  # Reduced penalty for other entities in short queries
             else:
                 score -= 8  # Original penalty for longer queries
 
         # CRITICAL: Use spaCy's dependency intelligence for compound nouns
         # In compound nouns, the HEAD is the main concept, modifiers describe it
         if token.dep_ == "ROOT":
-            # ROOT tokens get highest priority - they're the main concept
-            score += 20
+            # Check if this ROOT has descriptive identifier compounds
+            has_descriptive_identifier = False
+
+            # Check direct compound children
+            for child in token.children:
+                if child.dep_ == "compound" and self._is_descriptive_identifier(
+                    child, token
+                ):
+                    has_descriptive_identifier = True
+                    break
+
+            # Also check indirect descriptive identifiers in compound chain
+            if not has_descriptive_identifier:
+                has_descriptive_identifier = self._has_descriptive_identifier_in_chain(
+                    token, doc
+                )
+
+            if has_descriptive_identifier:
+                # Reduced ROOT boost when descriptive identifier is present
+                score += 10  # Lower boost to let descriptive identifier win
+            else:
+                # Full ROOT boost when no descriptive identifier
+                score += (
+                    20  # ROOT tokens get highest priority - they're the main concept
+                )
 
             # SPECIAL: If ROOT is detected as attribute but should be main concept, boost heavily
             if self.attribute_manager.is_attribute(
@@ -497,8 +524,16 @@ class ObjectiveExtractor:
         if token.dep_ == "compound":
             head_token = token.head
 
+            # Special boost for descriptive proper noun modifiers
+            if token.pos_ == "PROPN" and head_token and head_token.pos_ == "NOUN":
+                # Check if this is a descriptive modifier (like "christmas" in "christmas tree")
+                if self._is_descriptive_identifier(token, head_token):
+                    score += (
+                        35  # High boost for descriptive identifiers (beats ROOT boost)
+                    )
+
             # Check if this is a format-medium compound (like "pencil sketch", "oil painting")
-            if head_token and self._is_format_descriptor(head_token):
+            elif head_token and self._is_format_descriptor(head_token):
                 # In "pencil sketch", both "pencil" and "sketch" are format-related
                 # Use spaCy's semantic similarity to determine if compound is format-related
                 if self._is_format_related_compound(token, head_token):
@@ -692,7 +727,7 @@ class ObjectiveExtractor:
         return False
 
     def _assign_objectives(
-        self, content_candidates: List[Dict[str, Any]]
+        self, content_candidates: List[Dict[str, Any]], doc
     ) -> Tuple[Optional[str], List[str]]:
         """Assign main objective and sub-objectives from candidates"""
         main_objective = None
@@ -770,6 +805,16 @@ class ObjectiveExtractor:
 
         # Add other significant content words as sub-objectives
         for candidate in content_candidates:
+            # Check if this candidate should be an attribute instead of sub-objective
+            should_be_attribute = False
+            if candidate["pos"] == "NOUN":
+                # Look up the actual token in the doc
+                token = next((t for t in doc if t.text == candidate["text"]), None)
+                if token:
+                    should_be_attribute = self.attribute_manager._should_be_attribute(
+                        token, main_objective, doc
+                    )
+
             if (
                 candidate["text"].lower() != main_objective.lower()
                 and not candidate["is_format"]
@@ -777,6 +822,7 @@ class ObjectiveExtractor:
                 >= self.config.importance_threshold_sub_objectives
                 and candidate["dep"] != "compound"
                 and not candidate["is_attribute"]
+                and not should_be_attribute  # Skip tokens that should be attributes
             ):
 
                 sub_objectives.append(candidate["text"])
@@ -784,6 +830,14 @@ class ObjectiveExtractor:
                     break
 
         return main_objective, sub_objectives
+
+    def _get_tokens_in_compounds(self, compound_modifiers: List[str]) -> Set[str]:
+        """Get tokens that are part of compound modifiers"""
+        tokens_in_compounds = set()
+        for compound in compound_modifiers:
+            for part in compound.split():
+                tokens_in_compounds.add(part.lower())
+        return tokens_in_compounds
 
     def _should_allow_root_attribute(self, candidate: Dict[str, Any]) -> bool:
         """
@@ -917,16 +971,104 @@ class ObjectiveExtractor:
 
         return False
 
+    def _is_descriptive_identifier(self, token, head_token) -> bool:
+        """Check if token is a descriptive identifier like 'christmas' in 'christmas tree'"""
+
+        # Check if token is a proper noun modifying a common noun
+        if token.pos_ == "PROPN" and head_token.pos_ == "NOUN":
+
+            # Check if this looks like a descriptive/type identifier pattern
+            # Examples: "christmas tree", "birthday cake", "wedding dress"
+
+            # Use word frequency and context to identify descriptive proper nouns
+            if hasattr(token, "rank") and token.rank:
+                # Descriptive proper nouns are often moderately frequent
+                if 1000 < token.rank < 50000:
+
+                    # Check if the head noun is a common, generic noun
+                    if head_token.rank and head_token.rank < 20000:  # Common head noun
+                        return True
+
+            # Check if token length suggests it's a descriptive identifier
+            if len(token.text) > 4:  # Descriptive words are often longer
+                return True
+
+        return False
+
+    def _is_descriptive_modifier(self, token):
+        """Check if token is a descriptive modifier"""
+        if not token.has_vector:
+            return False
+
+        # Check if token is a common noun
+        if token.pos_ == "NOUN":
+            # Check if it's a common noun with descriptive properties
+            if self._is_descriptive_common_noun(token):
+                return True
+
+        return False
+
+    def _is_descriptive_common_noun(self, token):
+        """Check if token is a common noun with descriptive properties"""
+        if not token.has_vector:
+            return False
+
+        # Check if token is a proper noun
+        if token.pos_ == "PROPN":
+            return False
+
+        # Check if token has descriptive properties
+        if any(
+            child.dep_ in ["amod", "compound"]
+            and child.pos_ in ["ADJ", "PROPN", "NOUN"]
+            for child in token.children
+        ):
+            return True
+
+        return False
+
+    def _has_descriptive_identifier_in_chain(self, root_token, doc):
+        """Check for descriptive identifiers anywhere in the compound chain leading to root"""
+
+        # Find all compounds that eventually point to this root
+        compound_chain = []
+
+        for token in doc:
+            if token.dep_ == "compound":
+                # Check if this compound is in the chain leading to root
+                current = token
+                while current.head and current.head != current:
+                    if current.head == root_token:
+                        compound_chain.append(token)
+                        break
+                    elif current.head.dep_ == "compound":
+                        current = current.head
+                    else:
+                        break
+
+        # Check if any compound in the chain is a descriptive identifier
+        for compound in compound_chain:
+            # Find what this compound directly modifies
+            head = compound.head
+            if self._is_descriptive_identifier(compound, head):
+                return True
+
+        return False
+
 
 class MultiLayerClassifier:
     """Multi-layer classification system for robust attribute detection"""
 
-    def __init__(self, nlp_model, config: AnalysisConfig):
+    def __init__(self, nlp_model, config: AnalysisConfig, attribute_manager):
         self.nlp = nlp_model
         self.config = config
         self.pos_aware_layer = POSAwareClassifier(nlp_model, config)
-        self.entity_correction_layer = EntityCorrectionLayer(nlp_model, config)
-        self.compound_detection_layer = CompoundDetectionLayer(nlp_model, config)
+        self.entity_correction_layer = EntityCorrectionLayer(
+            nlp_model, config, attribute_manager
+        )
+        self.compound_detection_layer = CompoundDetectionLayer(
+            nlp_model, config, attribute_manager
+        )
         self.context_fallback_layer = ContextFallbackLayer(nlp_model, config)
 
     def classify_token(self, token, doc) -> Dict[str, Union[str, float]]:
@@ -1104,8 +1246,7 @@ class POSAwareClassifier:
             return False
 
         # Use semantic analysis to detect technique-like words
-        technique_indicators = ["technique", "method", "style", "approach", "way"]
-        for indicator in technique_indicators:
+        for indicator in self.config.technique_indicators:
             indicator_token = self.nlp(indicator)[0]
             if indicator_token.has_vector:
                 similarity = token.similarity(indicator_token)
@@ -1133,32 +1274,19 @@ class POSAwareClassifier:
 class EntityCorrectionLayer:
     """Corrects entity misclassifications"""
 
-    def __init__(self, nlp_model, config: AnalysisConfig):
+    def __init__(self, nlp_model, config: AnalysisConfig, attribute_manager):
         self.nlp = nlp_model
         self.config = config
+        self.attribute_manager = attribute_manager
 
     def classify(self, token, doc) -> Dict[str, Union[str, float]]:
         """Classify with entity correction"""
-
-        # Check for color misclassification
-        if self._is_misclassified_color(token):
-            return {
-                "category": "colors",
-                "confidence": self.config.entity_correction["correction_confidence"],
-            }
 
         # Check for other entity misclassifications
         if self._is_misclassified_entity(token):
             return self._correct_entity_classification(token, doc)
 
         return {"category": "unknown", "confidence": 0.0}
-
-    def _is_misclassified_color(self, token) -> bool:
-        """Check if token is a misclassified color"""
-        return (
-            token.text.lower() in self.config.entity_correction["color_words"]
-            and token.pos_ in self.config.entity_correction["misclassified_pos_tags"]
-        )
 
     def _is_misclassified_entity(self, token) -> bool:
         """Check if token is a misclassified entity"""
@@ -1227,18 +1355,64 @@ class EntityCorrectionLayer:
                     max_similarity = max(max_similarity, similarity)
 
             if max_similarity > threshold and max_similarity > best_confidence:
+                # Special handling for materials - use context awareness
+                if category == "materials":
+                    # Apply same context-aware logic as CompoundDetectionLayer
+                    if max_similarity < 0.7:  # Borderline case
+                        if self.attribute_manager._is_concrete_object_in_context(token):
+                            continue  # Skip classifying as material
+
                 best_category = category
                 best_confidence = max_similarity
 
         return {"category": best_category, "confidence": best_confidence}
 
+    def _is_concrete_object_in_context(self, token) -> bool:
+        """Check if token represents a concrete object rather than material"""
+
+        doc = token.doc  # Get document from token
+
+        # Check dependency context - objects often have descriptive modifiers
+        if token.dep_ == "ROOT":
+            # Check if it has adjective or nominal modifiers that suggest it's an object
+            descriptive_children = [
+                child
+                for child in token.children
+                if child.dep_ in ["amod", "compound"]
+                and child.pos_ in ["ADJ", "PROPN", "NOUN"]
+            ]
+
+            if descriptive_children:
+                # Check if any modifier suggests this is an object type (not material)
+                for modifier in descriptive_children:
+                    # Modifiers like "christmas", "wooden", etc. suggest object context
+                    if (
+                        modifier.pos_ == "PROPN"
+                    ):  # Proper nouns often indicate object types
+                        return True
+
+                    # Check if modifier is a time/event indicator
+                    if modifier.text.lower() in self.config.time_event_indicators:
+                        return True
+
+        # Check sentence context for object indicators
+        sentence_text = doc.text.lower()
+        if any(
+            indicator in sentence_text
+            for indicator in self.config.object_context_indicators
+        ):
+            return True
+
+        return False
+
 
 class CompoundDetectionLayer:
     """Detects compound subjects and structures"""
 
-    def __init__(self, nlp_model, config: AnalysisConfig):
+    def __init__(self, nlp_model, config: AnalysisConfig, attribute_manager):
         self.nlp = nlp_model
         self.config = config
+        self.attribute_manager = attribute_manager
 
     def classify(self, token, doc) -> Dict[str, Union[str, float]]:
         """Classify with compound detection"""
@@ -1340,22 +1514,28 @@ class CompoundDetectionLayer:
         if not token.has_vector:
             return False
 
-        # Check similarity to material prototypes
+        # Enhanced context-aware material detection
+
+        # First check basic semantic similarity to material prototypes
+        max_similarity = 0.0
         for prototype in self.config.material_prototypes:
             prototype_token = self.nlp(prototype)[0]
             if prototype_token.has_vector:
                 similarity = token.similarity(prototype_token)
-                if similarity > self.config.material_threshold:
-                    return True
+                max_similarity = max(max_similarity, similarity)
 
-        # Check if token has material-like characteristics
-        # Materials often have specific morphological patterns
-        if token.pos_ == "NOUN" and len(token.text) > 4:
-            # Check if it ends with material-like suffixes or has material-like properties
-            if token.text.endswith(("color", "paint", "ink", "clay", "wood")):
-                return True
+        # If similarity is low, definitely not a material
+        if max_similarity < self.config.material_threshold:
+            return False
 
-        return False
+        # If similarity is borderline, check context to avoid false positives
+        if max_similarity < 0.7:  # Borderline case
+            # Check if this token appears to be a concrete object rather than material
+            if self.attribute_manager._is_concrete_object_in_context(token, doc):
+                return False
+
+        # High similarity likely indicates actual material
+        return True
 
     def _is_compound_subject_part(self, token, doc) -> bool:
         """Check if token is part of compound subject like 'bird nest'"""
@@ -1514,7 +1694,31 @@ class ContextFallbackLayer:
             np.linalg.norm(token.vector) * np.linalg.norm(context_vector)
         )
 
-        # Classify based on contextual similarity
+        # Enhanced context-aware classification
+
+        # Check if this is likely a concrete object before defaulting to material
+        if self._is_likely_concrete_object(token):
+            # Concrete objects should not be classified as materials based on context alone
+            if (
+                contextual_similarity
+                > self.config.multi_layer_classification["contextual_similarity_high"]
+            ):
+                return {
+                    "category": "subject",
+                    "confidence": 0.6,
+                }  # More likely to be subject
+            elif (
+                contextual_similarity
+                < self.config.multi_layer_classification["contextual_similarity_low"]
+            ):
+                return {
+                    "category": "subject",
+                    "confidence": 0.5,
+                }  # Default to subject for objects
+            else:
+                return {"category": "unknown", "confidence": 0.3}  # Uncertain
+
+        # Original logic for non-concrete objects
         if (
             contextual_similarity
             > self.config.multi_layer_classification["contextual_similarity_high"]
@@ -1527,6 +1731,47 @@ class ContextFallbackLayer:
             return {"category": "subject", "confidence": 0.6}
         else:
             return {"category": "materials", "confidence": 0.5}
+
+    def _is_likely_concrete_object(self, token) -> bool:
+        """Check if token is likely a concrete object rather than abstract concept"""
+
+        # Check if token has object-like characteristics
+
+        # 1. Check dependency role - ROOT nouns in simple contexts often represent objects
+        if token.dep_ == "ROOT" and token.pos_ == "NOUN":
+            # Check if it has descriptive modifiers suggesting it's an object
+            descriptive_children = [
+                child
+                for child in token.children
+                if child.dep_ in ["amod", "compound"]
+                and child.pos_ in ["ADJ", "PROPN", "NOUN"]
+            ]
+            if descriptive_children:
+                return True
+
+        # 2. Check if it appears to be a concrete, physical entity
+        # Use semantic properties - concrete objects often have specific characteristics
+        if token.has_vector and hasattr(token, "rank"):
+            # Concrete objects are often moderately frequent and well-established
+            if token.rank and 1000 < token.rank < 50000:
+                # Check if it's not similar to abstract concepts
+                if not self._is_abstract_concept(token):
+                    return True
+
+        return False
+
+    def _is_abstract_concept(self, token) -> bool:
+        """Check if token represents an abstract concept"""
+
+        # Abstract concepts are often longer, less concrete words
+        if len(token.text) > 8:  # Very long words often abstract
+            return True
+
+        # Check for abstract word patterns
+        if any(token.text.endswith(suffix) for suffix in self.config.abstract_suffixes):
+            return True
+
+        return False
 
     def _default_classification(self, token) -> Dict[str, Union[str, float]]:
         """Default classification when all else fails"""
@@ -1548,7 +1793,7 @@ class AttributeManager:
         self.nlp = nlp_model
         self.config = config
         self.detectors = self._initialize_detectors()
-        self.multi_layer_classifier = MultiLayerClassifier(nlp_model, config)
+        self.multi_layer_classifier = MultiLayerClassifier(nlp_model, config, self)
         # Store reference to objective extractor for format detection
         self.objective_extractor = None
 
@@ -1628,7 +1873,9 @@ class AttributeManager:
         tokens_in_compounds = self._get_tokens_in_compounds(compound_modifiers)
 
         # Categorize tokens
-        self._categorize_tokens(doc, attributes, content_words, tokens_in_compounds)
+        self._categorize_tokens(
+            doc, attributes, content_words, tokens_in_compounds, main_objective
+        )
 
         # Add compound modifiers
         if compound_modifiers:
@@ -1685,6 +1932,7 @@ class AttributeManager:
         attributes: Dict[str, List[str]],
         content_words: Set[str],
         tokens_in_compounds: Set[str],
+        main_objective: Optional[str],
     ):
         """Categorize individual tokens and handle multi-word entities"""
 
@@ -1771,19 +2019,30 @@ class AttributeManager:
 
             # If not attributed by intelligent detectors, use POS-based classification
             if not attributed:
-                if token.pos_ == "ADJ":
-                    attributes["adjectives"].append(token_text)
-                elif token.pos_ == "ADV":
-                    attributes["descriptors"].append(token_text)
-                elif token.pos_ == "VERB" and token.tag_ == "VBG":
-                    attributes["actions"].append(token_text)
-                elif (
-                    token.pos_ == "VERB"
-                    and token.tag_ in self.config.past_participle_tags
+                # Enhanced classification for compound nouns that should be attributes
+                if token.pos_ == "NOUN" and self._should_be_attribute(
+                    token, main_objective, doc
                 ):
-                    attributes["descriptors"].append(token_text)
-                elif token.dep_ in self.config.modifier_deps:
-                    attributes["modifiers"].append(token_text)
+                    category = self._classify_compound_noun_attribute(token, doc)
+                    if category in attributes:
+                        attributes[category].append(token_text)
+                        attributed = True
+
+                # Original POS-based fallback
+                if not attributed:
+                    if token.pos_ == "ADJ":
+                        attributes["adjectives"].append(token_text)
+                    elif token.pos_ == "ADV":
+                        attributes["descriptors"].append(token_text)
+                    elif token.pos_ == "VERB" and token.tag_ == "VBG":
+                        attributes["actions"].append(token_text)
+                    elif (
+                        token.pos_ == "VERB"
+                        and token.tag_ in self.config.past_participle_tags
+                    ):
+                        attributes["descriptors"].append(token_text)
+                    elif token.dep_ in self.config.modifier_deps:
+                        attributes["modifiers"].append(token_text)
 
     def _is_format_related_compound_token(self, modifier_token, head_token) -> bool:
         """
@@ -1881,6 +2140,149 @@ class AttributeManager:
                 else:
                     final_attributes[category] = list(set(items))
         return final_attributes
+
+    def _should_be_attribute(self, token, main_objective, doc) -> bool:
+        """Check if a compound noun should be classified as an attribute"""
+
+        # Skip if this is the main objective
+        if main_objective and token.text.lower() == main_objective.lower():
+            return False
+
+        # Check if it's in a compound structure
+        if token.dep_ in ["compound", "ROOT"]:
+            # For compound tokens, they often describe or modify the main concept
+            if token.dep_ == "compound":
+                return True
+
+            # For ROOT tokens that aren't main objective (happens in compound chains)
+            elif token.dep_ == "ROOT":
+                # Check if there are any compounds modifying this ROOT
+                has_compound_modifiers = any(
+                    child.dep_ == "compound" for child in token.children
+                )
+                if has_compound_modifiers:
+                    return True
+
+        return False
+
+    def _classify_compound_noun_attribute(self, token, doc) -> str:
+        """Classify what type of attribute a compound noun should be"""
+
+        # Check if it's format/decoration related
+        if self._is_format_related_noun(token):
+            return "format_types"
+
+        # Check if it's a descriptive modifier
+        elif self._is_descriptive_modifier_noun(token, doc):
+            return "modifiers"
+
+        # Check if it could be shape-related
+        elif self._could_be_shape_related(token):
+            return "shapes"
+
+        # Default to modifiers for compound nouns
+        return "modifiers"
+
+    def _is_format_related_noun(self, token) -> bool:
+        """Check if noun is format/decoration related"""
+
+        if not token.has_vector:
+            return False
+
+        # Use relaxed threshold for format detection
+        format_prototypes = self.config.format_prototypes
+        for prototype in format_prototypes:
+            prototype_token = self.nlp(prototype)[0]
+            if prototype_token.has_vector:
+                similarity = token.similarity(prototype_token)
+                # Use lower threshold for compound noun classification
+                if similarity > 0.45:  # Lower than config threshold
+                    return True
+
+        # Check for decoration-specific patterns
+        for term in self.config.compound_detection["decoration_related"]:
+            term_token = self.nlp(term)[0]
+            if term_token.has_vector and token.has_vector:
+                similarity = token.similarity(term_token)
+                if similarity > 0.7:
+                    return True
+
+        return False
+
+    def _is_descriptive_modifier_noun(self, token, doc) -> bool:
+        """Check if noun is a descriptive modifier in compound structure"""
+
+        # Check if it's modifying something else in compound structure
+        if token.dep_ == "compound":
+            return True
+
+        # Check if it's a generic object noun that's not the main focus
+        if token.dep_ == "ROOT":
+            # Check if it has descriptive proper noun compounds
+            has_descriptive_propn = any(
+                child.dep_ == "compound" and child.pos_ == "PROPN"
+                for child in token.children
+            )
+            if has_descriptive_propn:
+                return True
+
+        return False
+
+    def _could_be_shape_related(self, token) -> bool:
+        """Check if noun could be shape-related"""
+
+        if not token.has_vector:
+            return False
+
+        # Use relaxed threshold for shape detection
+        shape_prototypes = self.config.shape_prototypes
+        for prototype in shape_prototypes:
+            prototype_token = self.nlp(prototype)[0]
+            if prototype_token.has_vector:
+                similarity = token.similarity(prototype_token)
+                if similarity > 0.4:  # Lower than config threshold
+                    return True
+
+        return False
+
+    def _is_concrete_object_in_context(self, token, doc=None) -> bool:
+        """Check if token represents a concrete object rather than material"""
+
+        if doc is None:
+            doc = token.doc  # Get document from token
+
+        # Check dependency context - objects often have descriptive modifiers
+        if token.dep_ == "ROOT":
+            # Check if it has adjective or nominal modifiers that suggest it's an object
+            descriptive_children = [
+                child
+                for child in token.children
+                if child.dep_ in ["amod", "compound"]
+                and child.pos_ in ["ADJ", "PROPN", "NOUN"]
+            ]
+
+            if descriptive_children:
+                # Check if any modifier suggests this is an object type (not material)
+                for modifier in descriptive_children:
+                    # Modifiers like "christmas", "wooden", etc. suggest object context
+                    if (
+                        modifier.pos_ == "PROPN"
+                    ):  # Proper nouns often indicate object types
+                        return True
+
+                    # Check if modifier is a time/event indicator
+                    if modifier.text.lower() in self.config.time_event_indicators:
+                        return True
+
+        # Check sentence context for object indicators
+        sentence_text = doc.text.lower()
+        if any(
+            indicator in sentence_text
+            for indicator in self.config.object_context_indicators
+        ):
+            return True
+
+        return False
 
 
 class NLPAnalyzer:

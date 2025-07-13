@@ -12,37 +12,35 @@
 
 Our NLP analyzer uses spaCy to intelligently parse search queries and extract:
 
-- **Main Objective**: What the user is primarily looking for
-- **Sub-objectives**: Secondary items of interest
-- **Attributes**: Descriptive properties (colors, sizes, materials, etc.)
+- **Main Objective**: What the user is primarily looking for.
+- **Attributes**: Descriptive properties (colors, sizes, materials, modifiers, etc.).
+- **Sub-objectives**: Secondary items of interest (now minimized in favor of richer attribute classification).
 
 ## System Architecture Overview
 
+The architecture is designed around a configuration-driven, multi-layered analysis pipeline that leverages spaCy's linguistic intelligence to handle complex and ambiguous queries.
+
 ```mermaid
-graph TB
-    Input["User Query: large red leather handbag"]
+graph TD
+    Input["User Query: 'christmas tree decoration'"]
 
     subgraph Core ["Core Components"]
         CM["ConfigManager"]
         NLP["NLPAnalyzer"]
-        SM["spaCy Model"]
+        SM["spaCy Model (en_core_web_lg)"]
     end
 
     subgraph Pipeline ["Analysis Pipeline"]
         OE["ObjectiveExtractor"]
         AM["AttributeManager"]
-        CME["CompoundModifierExtractor"]
+        MLC["🧠 MultiLayerClassifier"]
     end
 
-        subgraph Detection ["Attribute Detection"]
-        CD["🎨 ColorDetector (WebColors API)"]
-
-        subgraph Semantic ["Semantic Detectors"]
-            SizeD["📏 SizeDetector (large, small, tiny, huge)"]
-            MaterialD["🧱 MaterialDetector (wood, metal, leather, fabric)"]
-            ShapeD["🔵 ShapeDetector (round, square, oval, curved)"]
-            FormatD["📄 FormatDetector (digital, print, sketch, photo)"]
-        end
+    subgraph Layers ["MultiLayerClassifier Layers"]
+        POSL["1. POS-Aware Layer (e.g., 'painting' VERB vs. NOUN)"]
+        ECL["2. Entity Correction Layer (Fixes color misclassifications)"]
+        CDL["3. Compound Detection Layer (Handles 'christmas tree')"]
+        CFL["4. Context Fallback Layer (Uses surrounding words)"]
     end
 
     subgraph Output ["Output"]
@@ -52,19 +50,25 @@ graph TB
     Input --> NLP
     CM --> NLP
     NLP --> SM
+
     SM --> OE
     SM --> AM
-    AM --> CD
-    AM --> SizeD
-    AM --> MaterialD
-    AM --> ShapeD
-    AM --> FormatD
-    OE --> CME
+
+    AM <--> OE
+
+    AM --> MLC
+    MLC --> POSL
+    MLC --> ECL
+    MLC --> CDL
+    MLC --> CFL
+
     OE --> Result
     AM --> Result
 ```
 
 ## Data Flow: From Query to Results
+
+The data flow is now centered around the Multi-Layer Classifier, which provides robust, context-aware attribute identification before the final objectives are assigned.
 
 ```mermaid
 sequenceDiagram
@@ -73,20 +77,23 @@ sequenceDiagram
     participant spaCy
     participant ObjectiveExtractor
     participant AttributeManager
-    participant Detectors
+    participant MultiLayerClassifier
 
-    User->>NLPAnalyzer: "large red leather handbag"
+    User->>NLPAnalyzer: "christmas tree decoration"
     NLPAnalyzer->>spaCy: Process text
     spaCy-->>NLPAnalyzer: Doc object with tokens, POS, deps
 
+    %% ObjectiveExtractor and AttributeManager work together
     NLPAnalyzer->>ObjectiveExtractor: Extract objectives
-    ObjectiveExtractor->>ObjectiveExtractor: Score tokens by importance
-    ObjectiveExtractor-->>NLPAnalyzer: main: "handbag", sub: []
+    ObjectiveExtractor->>AttributeManager: Use MultiLayerClassifier for token analysis
+    AttributeManager->>MultiLayerClassifier: classify_token(token, doc)
+    MultiLayerClassifier-->>AttributeManager: {category: 'format_types', confidence: 0.8} for 'decoration'
 
-    NLPAnalyzer->>AttributeManager: Categorize attributes
-    AttributeManager->>Detectors: Check each token
-    Detectors-->>AttributeManager: "red"->color, "large"->size, "leather"->material
-    AttributeManager-->>NLPAnalyzer: Categorized attributes
+    ObjectiveExtractor->>ObjectiveExtractor: Score tokens based on grammar and semantics
+    ObjectiveExtractor-->>NLPAnalyzer: main: "christmas"
+
+    NLPAnalyzer->>AttributeManager: Categorize remaining attributes
+    AttributeManager-->>NLPAnalyzer: attributes: {modifiers: ["tree"], format_types: ["decoration"]}
 
     NLPAnalyzer-->>User: Complete analysis result
 ```
@@ -124,17 +131,19 @@ for token in doc:
 
 ### 3. Dependency Parsing
 
+In "christmas tree decoration", spaCy identifies a compound chain: `christmas -> tree -> decoration`.
+
 ```mermaid
 graph TD
-    handbag["handbag (ROOT - NOUN)"]
-    large["large (amod - ADJ)"]
-    red["red (amod - ADJ)"]
-    leather["leather (compound - NOUN)"]
+    decoration["decoration (ROOT - NOUN)"]
+    tree["tree (compound - NOUN)"]
+    christmas["christmas (compound - PROPN)"]
 
-    handbag --> large
-    handbag --> red
-    handbag --> leather
+    decoration --> tree
+    tree --> christmas
 ```
+
+Our system intelligently analyzes this chain to determine the true main objective.
 
 ## Core Components Deep Dive
 
@@ -143,112 +152,94 @@ graph TD
 ```python
 class ConfigManager:
     # Loads configuration from config.json
-    # Contains thresholds, prototypes, scoring parameters
+    # Contains thresholds, prototypes, scoring parameters, and heuristic word lists
     # Validates configuration integrity
 ```
 
-**Purpose**: Centralized configuration management without hardcoded values.
+**Purpose**: Centralized configuration management without hardcoded values. All heuristics and parameters are tunable.
 
 ### 2. ObjectiveExtractor
 
 ```python
 class ObjectiveExtractor:
     def extract_objectives(self, doc):
-        # 1. Find compound modifiers ("hand drawn", "oil painted")
-        # 2. Score tokens by grammatical importance
-        # 3. Select highest-scoring non-attribute as main objective
-        # 4. Select other significant tokens as sub-objectives
+        # 1. Find all potential content candidates (nouns, proper nouns).
+        # 2. Use the AttributeManager and its MultiLayerClassifier to pre-classify tokens.
+        # 3. Calculate an importance score for each candidate.
+        # 4. Select the main objective based on score and context.
 ```
 
-**Scoring Algorithm**:
+**Importance Scoring (Conceptual)**:
+The scoring is no longer a simple sum of boosts and penalties. It's a nuanced algorithm that prioritizes tokens based on:
 
-- **+7**: Subject/Object dependency relations (subject_object_boost + 5)
-- **+1**: Root of dependency tree (root_boost)
-- **+3**: Concrete nouns (concrete_noun_boost + 2)
-- **+3**: Has adjective modifiers (adjective_modifier_boost + 2)
-- **-8**: Is a named entity (should be attribute)
-- **-10**: Is detected as attribute
+- **Grammatical Role**: `ROOT` tokens are important, but not always the main objective.
+- **Descriptive Power**: In a compound chain like "christmas tree", the descriptive identifier ("christmas") is given a higher score than the generic head noun ("tree").
+- **Subject vs. Format**: The system differentiates between subject matter ("dog") and format descriptors ("sketch"). In art queries, the subject is usually preferred as the main objective.
+- **Semantic Context**: A token's score is influenced by its relationship to other words in the query.
 
-### 3. AttributeManager
+### 3. AttributeManager & Multi-Layer Classifier (The Brains of the Operation)
+
+The `AttributeManager` now orchestrates a powerful `MultiLayerClassifier` to ensure attributes are identified accurately and contextually.
 
 ```python
 class AttributeManager:
     def __init__(self):
-        self.detectors = [
-            ColorDetector(),                    # 🎨 Uses WebColors library
-            SizeDetector(),                     # 📏 Semantic similarity for sizes
-            MaterialDetector(),                 # 🧱 Semantic similarity for materials
-            ShapeDetector(),                    # 🔵 Semantic similarity for shapes
-            FormatDetector()                    # 📄 Semantic similarity for formats
-        ]
+        # Initializes base detectors (Color, Semantic)
+        # Initializes the MultiLayerClassifier
+        self.multi_layer_classifier = MultiLayerClassifier(...)
 
-# Note: SizeDetector, MaterialDetector, etc. are conceptual names for clarity.
-# In the actual implementation, these are all instances of SemanticAttributeDetector
-# configured with different prototypes and thresholds.
+class MultiLayerClassifier:
+    def __init__(self):
+        self.pos_aware_layer = POSAwareClassifier(...)
+        self.entity_correction_layer = EntityCorrectionLayer(...)
+        self.compound_detection_layer = CompoundDetectionLayer(...)
+        self.context_fallback_layer = ContextFallbackLayer(...)
+
+    def classify_token(self, token, doc):
+        # Passes token through each layer until a confident classification is found.
 ```
 
-**Detection Strategy**:
+## Attribute Detection Pipeline (New)
 
-- **🎨 Colors**: Exact match against CSS3/CSS2 color names (WebColors API)
-- **📏 Sizes**: Semantic similarity to prototypes (large, small, tiny, huge...)
-- **🧱 Materials**: Semantic similarity to prototypes (wood, metal, leather, fabric...)
-- **🔵 Shapes**: Semantic similarity to prototypes (round, square, oval, curved...)
-- **📄 Formats**: Semantic similarity to prototypes (digital, print, sketch, photo...)
-- **Fallback**: POS-based classification for unmatched attributes
-
-### 4. Attribute Detection Pipeline
-
-The system processes each token through a tiered detection strategy:
+The system uses a multi-layered pipeline, where each layer solves a specific type of ambiguity.
 
 ```mermaid
 flowchart TD
-    Token["Token: crimson"]
+    Token["Token (e.g., 'tree', 'painting')"]
 
-    subgraph ColorDetection ["🎨 Color Detection"]
-        WC["WebColors Lookup"]
-        CSS3{"CSS3 Color?"}
-        CSS2{"CSS2 Color?"}
+    Token --> L1["🧠 1. POS-Aware Layer"]
+    L1 -->|Is it painting?| L1_Check{"Check if VERB or NOUN"}
+    L1_Check -->|"It's a NOUN"| L1_Result["✅ Classify as format_type"]
+    L1_Check -->|Not painting or Unsure| L2["🧠 2. Entity Correction Layer"]
+
+    L2 -->|Is it misclassified color?| L2_Result["✅ Classify as color"]
+    L2 -->|Unsure| L3["🧠 3. Compound Detection Layer"]
+
+    L3 -->|Is token tree in christmas tree?| L3_Check{"Analyze compound structure"}
+    L3_Check --> L3_Result["✅ Classify as modifier (attribute)"]
+    L3 -->|Unsure| L4["🧠 4. Context Fallback Layer"]
+
+    L4 -->|Analyze surrounding words| L4_Result["✅ Best guess based on context"]
+
+    subgraph Layers
+        L1
+        L2
+        L3
+        L4
     end
 
-    subgraph SemanticDetection ["📏 Semantic Detection"]
-        Vector{"Has Vector?"}
-        Similarity["Compare to Prototypes"]
-        Threshold{"Above Threshold?"}
-    end
-
-    subgraph POSFallback ["📝 POS Fallback"]
-        POS["Check POS Tag"]
-        Classify["Classify by Grammar"]
-    end
-
-    Token --> WC
-    WC --> CSS3
-    CSS3 -->|Yes| ColorMatch["✅ Color: confidence=1.0"]
-    CSS3 -->|No| CSS2
-    CSS2 -->|Yes| ColorMatch2["✅ Color: confidence=0.95"]
-    CSS2 -->|No| Vector
-
-    Vector -->|Yes| Similarity
-    Vector -->|No| POS
-    Similarity --> Threshold
-    Threshold -->|Yes| SemanticMatch["✅ Semantic Match"]
-    Threshold -->|No| POS
-
-    POS --> Classify
-    Classify --> POSMatch["✅ POS-based Classification"]
+    L4_Result --> Final["Final Classification"]
 ```
 
-**Pipeline Stages:**
+**Pipeline Stages & Purpose:**
 
-1. **🎨 Color Detection (Highest Priority)**: Uses WebColors API for exact color matching
-2. **📏 Semantic Detection**: Compares word vectors against prototype vocabularies
-3. **📝 POS Fallback**: Uses grammatical classification when other methods fail
-
-**Example Flow:**
-
-- `"crimson"` → WebColors finds CSS3 match → ✅ Color (confidence=1.0)
-- `"large"` → No color match → Has vector → Similarity to size prototypes → ✅ Size (confidence=0.8)
-- `"old"` → No color match → No semantic match → POS=ADJ → ✅ Adjective
+1.  **🧠 POS-Aware Layer**: Handles words whose meaning depends on their part of speech.
+    - _Example_: Classifies "painting" as an action (verb) or a format type (noun) based on its grammatical role.
+2.  **🧠 Entity Correction Layer**: Fixes common spaCy entity misclassifications.
+    - _Example_: Correctly identifies "red" or "blue" as colors, even if spaCy mistakenly tags them as organizations.
+3.  **🧠 Compound Detection Layer**: The key to understanding compound subjects. It analyzes relationships within compound nouns.
+    - _Example_: In "christmas tree", it recognizes that "tree" is a modifier describing the main concept, "christmas". It also ensures "tree" is treated as an attribute, not a sub-objective.
+4.  **🧠 Context Fallback Layer**: A safety net that uses the semantic vectors of surrounding words to make an educated guess when other layers are uncertain.
 
 ## Semantic Similarity Explained
 
@@ -273,6 +264,8 @@ similarity3 = large_token.similarity(red_token)  # ~0.15 (not similar)
 
 ### Prototype-Based Detection
 
+This is still used within the classification layers but with more contextual checks.
+
 ```python
 class SemanticAttributeDetector:
     def __init__(self, prototypes=["large", "big", "small", "tiny"]):
@@ -288,133 +281,87 @@ class SemanticAttributeDetector:
         return max_similarity > threshold
 ```
 
-## Example: Complete Processing Flow
+## Example: Complete Processing Flow (New)
 
-### Input: "Show me large red leather handbags"
+### Input: "christmas tree decoration"
 
 #### Step 1: spaCy Processing
 
 ```python
-doc = nlp("Show me large red leather handbags")
-# Creates tokens with linguistic annotations
+doc = nlp("christmas tree decoration")
+# Creates tokens and dependency chain: christmas -> tree -> decoration (ROOT)
 ```
 
-#### Step 2: Token Analysis
+#### Step 2: Candidate Analysis & Scoring (`ObjectiveExtractor`)
 
-```
-Token    | POS  | Dep     | Head     | Analysis
----------|------|---------|----------|----------
-Show     | VERB | ROOT    | Show     | Action verb (skip)
-me       | PRON | iobj    | Show     | Pronoun (skip)
-large    | ADJ  | amod    | handbags | Adjective modifier
-red      | ADJ  | amod    | handbags | Adjective modifier
-leather  | NOUN | compound| handbags | Compound noun
-handbags | NOUN | dobj    | Show     | Direct object
-```
+1.  **Candidates**: `christmas`, `tree`, `decoration`.
+2.  **Attribute Pre-classification (`MultiLayerClassifier`)**:
+    - `decoration`: Identified as `format_types` with high confidence.
+    - `tree`: Passed to `CompoundDetectionLayer`. Since it's part of the "christmas tree" compound driven by a descriptive identifier, it's classified as a `modifier` attribute.
+3.  **Importance Scoring**:
+    - `christmas`: `PROPN` (proper noun) and a descriptive identifier for the head `tree`. It receives a very high importance score, higher than the grammatical `ROOT`.
+    - `tree`: Is an attribute (`modifier`), so its importance score for being a main objective is penalized.
+    - `decoration`: Is an attribute (`format_type`), also penalized.
+4.  **Objective Selection**: `christmas` has the highest score and becomes the `main_objective`.
 
-#### Step 3: Objective Extraction
+#### Step 3: Final Attribute Categorization (`AttributeManager`)
 
-```python
-# Scoring:
-# "handbags": base(1) + subject_object_boost(2) + 5 + concrete_noun(3) = 11
-# "leather": base(1) + compound_penalty(1) = 2
-# "large": base(1) - attribute_penalty(-10) = -9
-# "red": base(1) - attribute_penalty(-10) = -9
+- The system iterates through the non-objective tokens.
+- `tree`: Already classified as a `modifier`.
+- `decoration`: Already classified as a `format_type`.
 
-# Result: main_objective = "handbags"
-```
-
-#### Step 4: Attribute Detection
-
-```python
-# "large" -> SemanticAttributeDetector finds similarity to size prototypes
-# "red" -> ColorDetector finds exact CSS color match
-# "leather" -> SemanticAttributeDetector finds similarity to material prototypes
-```
-
-#### Step 5: Final Result
+#### Step 4: Final Result
 
 ```json
 {
-  "query": "Show me large red leather handbags",
-  "main_objective": "handbags",
+  "query": "christmas tree decoration",
+  "main_objective": "christmas",
   "sub_objectives": [],
   "attributes": {
-    "colors": ["red"],
-    "sizes": ["large"],
-    "materials": ["leather"]
+    "modifiers": ["tree"],
+    "format_types": ["decoration"]
   }
 }
-```
-
-## Advanced Features
-
-### 1. Compound Modifier Detection
-
-```python
-# Input: "hand drawn illustration"
-# Detects: "hand drawn" as compound modifier
-# Pattern: NOUN + PAST_PARTICIPLE with artistic context
-```
-
-### 2. Entity Handling
-
-```python
-# spaCy identifies: "Van Gogh" as PERSON entity
-# Our system: Keeps as entity, doesn't make it main objective
-```
-
-### 3. Importance Scoring
-
-```python
-def calculate_importance_score(token):
-    score = base_importance_score  # 1 from config
-    if token.dep_ in subject_object_deps:  # Subject/Object
-        score += subject_object_boost + 5  # 2 + 5 = 7
-    if token.dep_ == "ROOT":               # Root of sentence
-        score += root_boost                # 1 from config
-    if is_attribute(token):                # Detected attribute
-        score -= 10                        # Heavy penalty
-    return score
 ```
 
 ## Configuration-Driven Approach
 
 ### Why Configuration?
 
-- **Flexibility**: Adjust thresholds without code changes
-- **Maintainability**: Clear separation of logic and parameters
-- **Tuning**: Easy to optimize for different domains
+- **Flexibility**: Adjust thresholds and behavior without code changes.
+- **Maintainability**: Clear separation of logic and parameters.
+- **Tuning**: Easy to optimize for different domains by modifying the JSON file.
 
-### Sample config.json
+### Sample `config.json` (Updated)
+
+Note the new lists for heuristic checks, which were previously hardcoded.
 
 ```json
 {
-  "color_threshold": 0.5,
   "size_threshold": 0.6,
   "material_threshold": 0.65,
-  "size_prototypes": [
-    "small",
-    "large",
-    "tiny",
-    "huge",
-    "medium",
-    "big",
-    "little",
-    "enormous"
-  ],
-  "material_prototypes": [
-    "wood",
-    "metal",
-    "plastic",
-    "glass",
-    "ceramic",
-    "fabric",
-    "leather"
-  ],
+  "size_prototypes": ["small", "large", "tiny", "huge"],
+  "material_prototypes": ["wood", "metal", "plastic", "leather"],
+
   "importance_threshold_sub_objectives": 3,
-  "entity_boost": 2,
-  "subject_object_boost": 2
+  "subject_object_boost": 2,
+
+  "time_event_indicators": ["christmas", "birthday", "wedding", "holiday"],
+  "object_context_indicators": [
+    "decoration",
+    "ornament",
+    "design",
+    "art",
+    "gift",
+    "toy"
+  ],
+  "technique_indicators": ["technique", "method", "style", "approach", "way"],
+  "abstract_suffixes": ["tion", "sion", "ness", "ment", "ity", "ism"],
+
+  "multi_layer_classification": {
+    "semantic_confidence_threshold": 0.7,
+    "contextual_similarity_high": 0.8
+  }
 }
 ```
 
@@ -446,84 +393,21 @@ except OSError:
 
 ## Testing and Validation
 
-### Unit Testing Approach
+The testing approach remains the same, with `test_fixes.py` providing integration tests for the full analysis pipeline.
 
 ```python
-def test_color_detection():
-    detector = ColorDetector(nlp, config)
-
-    # Test exact matches
-    assert detector.detect("red")[0] == True
-    assert detector.detect("crimson")[0] == True
-
-    # Test non-colors
-    assert detector.detect("large")[0] == False
-```
-
-### Integration Testing
-
-```python
-def test_full_analysis():
+def test_christmas_query():
     analyzer = NLPAnalyzer()
-    result = analyzer.analyze_query("large red leather handbag")
+    result = analyzer.analyze_query("christmas tree decoration")
 
-    assert result["main_objective"] == "handbag"
-    assert "red" in result["attributes"]["colors"]
-    assert "large" in result["attributes"]["sizes"]
+    assert result["main_objective"] == "christmas"
+    assert "tree" in result["attributes"]["modifiers"]
+    assert "decoration" in result["attributes"]["format_types"]
+    assert not result["sub_objectives"]
 ```
 
-## Error Handling
+## Error Handling & Extensibility
 
-### Graceful Degradation
+The system's core principles of graceful error handling and extensibility remain. Adding a new attribute type would now likely involve enhancing one of the classifier layers or adding a new one to the `MultiLayerClassifier` pipeline, in addition to registering any new semantic prototypes in the configuration.
 
-```python
-try:
-    webcolors.name_to_hex(color, spec=webcolors.CSS3)
-    return True, 1.0
-except ValueError:
-    try:
-        webcolors.name_to_hex(color, spec=webcolors.CSS2)
-        return True, 0.95
-    except ValueError:
-        return False, 0.0  # Graceful failure
-```
-
-### Configuration Validation
-
-```python
-def __post_init__(self):
-    for field_name in ["size_prototypes", "material_prototypes"]:
-        if not isinstance(getattr(self, field_name), list):
-            raise ValueError(f"{field_name} must be a list")
-```
-
-## Extending the System
-
-### Adding New Attribute Types
-
-```python
-class BrandDetector(AttributeDetector):              # 🏷️ Custom brand detection
-    def detect(self, token):
-        # Custom brand detection logic (e.g., Nike, Apple, Samsung...)
-        return is_brand, confidence
-
-    def get_category_name(self):
-        return "brands"
-
-# Register in AttributeManager
-detectors.append(BrandDetector(self.nlp, self.config))
-```
-
-### Custom Scoring Rules
-
-```python
-# In config.json
-{
-  "custom_boost_rules": {
-    "brand_boost": 3,
-    "technical_spec_boost": 2
-  }
-}
-```
-
-This architecture provides a robust, extensible foundation for query understanding that can be easily adapted to different domains and requirements.
+This architecture provides a highly robust, extensible, and context-aware foundation for query understanding.
