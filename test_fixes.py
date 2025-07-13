@@ -180,6 +180,56 @@ def verify_classification():
         "Moon shape vector - format detection",
     )
 
+    # Test Case 9: christmas tree
+    print(f"\n🔍 Testing: 'christmas tree'")
+    result = analyzer.analyze_query("christmas tree")
+    results.assert_equal(
+        result["main_objective"], "christmas", "Christmas tree - main objective"
+    )
+    results.assert_contains(
+        result["attributes"].get("modifiers", []),
+        "tree",
+        "Christmas tree - 'tree' as modifier",
+    )
+    results.assert_not_contains(
+        result["sub_objectives"], "tree", "Christmas tree - no sub-objective 'tree'"
+    )
+    results.assert_not_contains(
+        result["attributes"], "entities", "Christmas tree - no entities"
+    )
+
+    # Test Case 10: christmas tree decoration
+    print(f"\n🔍 Testing: 'christmas tree decoration'")
+    result = analyzer.analyze_query("christmas tree decoration")
+    results.assert_equal(
+        result["main_objective"],
+        "christmas",
+        "Christmas tree decoration - main objective",
+    )
+    results.assert_contains(
+        result["attributes"].get("modifiers", []),
+        "tree",
+        "Christmas tree decoration - 'tree' as modifier",
+    )
+    results.assert_contains(
+        result["attributes"].get("format_types", []),
+        "decoration",
+        "Christmas tree decoration - 'decoration' as format type",
+    )
+    results.assert_not_contains(
+        result["sub_objectives"],
+        "tree",
+        "Christmas tree decoration - no sub-objective 'tree'",
+    )
+    results.assert_not_contains(
+        result["sub_objectives"],
+        "decoration",
+        "Christmas tree decoration - no sub-objective 'decoration'",
+    )
+    results.assert_not_contains(
+        result["attributes"], "entities", "Christmas tree decoration - no entities"
+    )
+
     results.print_summary()
     return results.failed == 0
 
