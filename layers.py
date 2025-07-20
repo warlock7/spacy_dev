@@ -268,6 +268,10 @@ class ObjectiveClassifier:
             if cand["dep"] in self._subject_object_deps:
                 conf += 0.2
 
+            # Boost compound attached to a conjunct head (e.g., 'panda' in 'tiger and panda icon')
+            if cand["dep"] == "compound" and cand["token"].head.dep_ == "conj":
+                conf += 0.15
+
             # Penalise ROOT tokens that are semantically generic containers
             if cand["dep"] == "ROOT" and self._is_container(cand["token"]):
                 conf = min(conf, 0.4)
@@ -281,6 +285,8 @@ class ObjectiveClassifier:
         # Main objective = highest confidence (ties broken by list order)
         main_candidate = max(candidates, key=lambda c: c["confidence"])
         main_text = main_candidate["text"]
+        main_token = main_candidate["token"]
+        main_is_theme = self._is_theme(main_token)
 
         # Sub-objectives: next best non-format words with confidence ≥ 0.8
         sub_objectives: List[str] = []
@@ -289,6 +295,7 @@ class ObjectiveClassifier:
                 cand is not main_candidate
                 and not cand["is_format"]
                 and cand["confidence"] >= 0.8  # stricter threshold
+                and not (main_is_theme and cand["token"].i == main_token.head.i)
             ):
                 sub_objectives.append(cand["text"])
                 if len(sub_objectives) >= self._analyzer.config.max_sub_objectives:
