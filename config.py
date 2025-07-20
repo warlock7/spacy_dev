@@ -219,3 +219,14 @@ class NLPConfig:
             "diamond",
         ]
     )
+
+    container_prototypes: List[str] = field(
+        default_factory=lambda: [
+            "decoration",
+            "ornament",
+            "banner",
+            "design",
+            "item",
+            "thing",
+        ]
+    )

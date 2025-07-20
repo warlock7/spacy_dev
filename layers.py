@@ -197,6 +197,22 @@ class ObjectiveClassifier:
         cfg = analyzer.config
         self._subject_object_deps = set(cfg.subject_object_deps)
 
+        # Container-category centroid built from a few seed words
+        container_seeds = cfg.container_prototypes
+        import numpy as np
+
+        self._container_centroid = np.mean(
+            [
+                analyzer.nlp(w)[0].vector
+                for w in container_seeds
+                if analyzer.nlp(w)[0].has_vector
+            ],
+            axis=0,
+        )
+        self._container_centroid_norm = (
+            float(np.linalg.norm(self._container_centroid)) or 1.0
+        )
+
         # Theme prototypes for vector centroid (birthday, christmas, halloween, wedding)
         self._theme_proto_tokens = [
             analyzer.nlp(word)[0]
@@ -239,7 +255,10 @@ class ObjectiveClassifier:
             if cand["dep"] in self._subject_object_deps:
                 conf += 0.2
 
-            # Clamp to [0,1]
+            # Penalise ROOT tokens that are semantically generic containers
+            if cand["dep"] == "ROOT" and self._is_container(cand["token"]):
+                conf = min(conf, 0.4)
+
             return min(conf, 1.0)
 
         # Assign confidence to each candidate
@@ -256,7 +275,7 @@ class ObjectiveClassifier:
             if (
                 cand is not main_candidate
                 and not cand["is_format"]
-                and cand["confidence"] >= 0.8
+                and cand["confidence"] >= 0.8  # stricter threshold
             ):
                 sub_objectives.append(cand["text"])
                 if len(sub_objectives) >= self._analyzer.config.max_sub_objectives:
@@ -275,6 +294,15 @@ class ObjectiveClassifier:
             token.vector_norm * self._theme_centroid_norm
         )
         return sim >= 0.55
+
+    def _is_container(self, token: Token) -> bool:
+        """Check if token resembles a generic container noun via vector similarity."""
+        if not token.has_vector:
+            return False
+        sim = token.vector.dot(self._container_centroid) / (
+            token.vector_norm * self._container_centroid_norm
+        )
+        return sim >= 0.5
 
 
 # -----------------------------------------------------------------------------
