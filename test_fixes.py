@@ -3,7 +3,7 @@
 Proper test script with assertions to verify classification improvements
 """
 
-from nlp_analyzer_architecture import NLPAnalyzer
+from nlp_analyzer_refactored import NLPAnalyzer
 import json
 
 
