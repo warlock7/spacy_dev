@@ -175,12 +175,25 @@ class AttributeManager:
         if compound_mods:
             attributes["modifiers"].extend(compound_mods)
 
-        # Final deduplication and empty-category removal
-        finalized: Dict[str, Any] = {
-            name: (vals if name == "entities" else list(set(vals)))
-            for name, vals in attributes.items()
-            if vals
-        }
+        # Remove main and sub objective words from attributes
+        def _filter(tokens: List[str]) -> List[str]:
+            return [t for t in tokens if t.lower() not in content_words]
+
+        filtered_attributes: Dict[str, Any] = {}
+        for name, vals in attributes.items():
+            if not vals:
+                continue
+            if name == "entities":
+                # For entities keep those whose text isn't main/sub objective
+                filtered = [e for e in vals if e["text"].lower() not in content_words]
+                if filtered:
+                    filtered_attributes[name] = filtered
+            else:
+                uniq = list(set(_filter(vals)))
+                if uniq:
+                    filtered_attributes[name] = uniq
+
+        finalized = filtered_attributes
         return finalized
 
 
